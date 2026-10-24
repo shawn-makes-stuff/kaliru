@@ -4,19 +4,16 @@
 //
 // This file may be distributed under the terms of the GNU GPLv3 license.
 //
-// Deliberate differences (no python source tree next to the binary):
-// - get_git_version() reports KALICO_VERSION, the Kalico commit this port
-//   tracks (like Moonruster reports the Moonraker version it tracks);
-//   branch / remote / url are "?"
+// Rusticc: get_git_version() runs git in the install directory as Kalico
+// does, then reads klippy/.version (the klippy directory is
+// plugins::klippy_dir()).
+// Deliberate difference (no python source tree next to the binary):
 // - dump_mcu_build() looks for the mcu build files one directory above the
 //   binary (python: one directory above klippy/, the source tree root)
 use crate::logging;
 use crate::pyfmt::py_strip;
 use std::ffi::CString;
 use std::os::fd::RawFd;
-
-/// `git describe` of the Kalico commit this port tracks (5b59427)
-pub const KALICO_VERSION: &str = "v2026.10.00-155-g5b594279";
 
 // Return the SIGINT interrupt handler back to the OS default
 pub fn fix_sigint() {
@@ -171,13 +168,113 @@ pub struct GitInfo {
     pub url: String,
 }
 
-/// get_git_version(): see the module comment
+/// Rusticc: get_git_version(from_file=True) as Kalico runs it from an
+/// install directory (COSMOS: /usr/share/klipper, no git repository): git
+/// describe in klippy/.., else klippy/.version ("Release - <version>")
 pub fn get_git_version() -> GitInfo {
-    GitInfo {
-        version: KALICO_VERSION.into(),
-        file_status: vec![],
-        branch: "?".into(),
-        remote: "?".into(),
-        url: "?".into(),
+    let klippy_src = crate::plugins::klippy_dir();
+    let gitdir = klippy_src.join("..").to_string_lossy().into_owned();
+    let mut info = GitInfo { version: "?".into(), file_status: vec![], branch: "?".into(), remote: "?".into(), url: "?".into() };
+    match git(&gitdir, &["describe", "--always", "--tags", "--long", "--dirty"]) {
+        Ok((0, ver, _)) => {
+            info.version = bytes_strip(&ver);
+            match git(&gitdir, &["status", "--porcelain", "--ignored"]) {
+                Ok((0, stat, _)) => {
+                    info.file_status = bytes_strip(&stat).split('\n').map(|l| py_split_maxsplit1(l)).collect();
+                }
+                Ok((_, _, err)) => logging::debug(&format!("Error getting git status: {}", crate::pyfmt::py_bytes_repr(&err))),
+                Err(e) => logging::debug(&format!("Exception on run: {}", e)),
+            }
+            get_repo_info(&gitdir, &mut info);
+            return info;
+        }
+        Ok((_, _, err)) => logging::debug(&format!("Error getting git version: {}", crate::pyfmt::py_bytes_repr(&err))),
+        Err(e) => logging::debug(&format!("Exception on run: {}", e)),
+    }
+    info.version = get_version_from_file(&klippy_src);
+    info
+}
+
+/// get_version_from_file(klippy_src)
+pub fn get_version_from_file(klippy_src: &std::path::Path) -> String {
+    match std::fs::read_to_string(klippy_src.join(".version")) {
+        Ok(s) => s.trim_end().to_string(),
+        Err(_) => "?".into(),
+    }
+}
+
+/// subprocess.Popen(("git", "-C", gitdir, ...)): (returncode, stdout,
+/// stderr), or the traceback.format_exc() text when git cannot run
+fn git(gitdir: &str, args: &[&str]) -> Result<(i32, Vec<u8>, Vec<u8>), String> {
+    match std::process::Command::new("git").arg("-C").arg(gitdir).args(args).output() {
+        Ok(o) => Ok((o.status.code().unwrap_or(-1), o.stdout, o.stderr)),
+        Err(e) => Err(format!(
+            "Traceback (most recent call last):\n  File \"<kaliru>\"\n{}: {}\n",
+            crate::pyfmt::py_oserror_class(&e),
+            crate::pyfmt::py_oserror(&e, "git")
+        )),
+    }
+}
+
+/// str(b.strip().decode())
+fn bytes_strip(b: &[u8]) -> String {
+    py_strip(&String::from_utf8_lossy(b)).to_string()
+}
+
+/// str.split(None, 1)
+fn py_split_maxsplit1(l: &str) -> Vec<String> {
+    let t = l.trim_start();
+    if t.is_empty() {
+        return vec![];
+    }
+    match t.find(char::is_whitespace) {
+        Some(i) => vec![t[..i].to_string(), t[i..].trim_start().to_string()],
+        None => vec![t.to_string()],
+    }
+}
+
+/// _get_repo_info(gitdir)
+fn get_repo_info(gitdir: &str, info: &mut GitInfo) {
+    let res = (|| -> Result<(), String> {
+        let (rc, branch_list, err) = git(gitdir, &["branch", "--no-color"])?;
+        if rc != 0 {
+            logging::debug(&format!("Error running git branch: {}", crate::pyfmt::py_bytes_repr(&err)));
+            return Ok(());
+        }
+        let text = bytes_strip(&branch_list);
+        match text.split('\n').find(|l| l.starts_with('*')) {
+            Some(l) => info.branch = py_strip(&l[1..]).to_string(),
+            None => {
+                logging::debug(&format!("Unable to find current branch:\n{}", crate::pyfmt::py_bytes_repr(&branch_list)));
+                return Ok(());
+            }
+        }
+        if info.branch.starts_with("(HEAD detached") {
+            let inner = info.branch.trim_matches(|c| c == '(' || c == ')');
+            let last = inner.split_whitespace().last().unwrap_or("");
+            let parts: Vec<&str> = last.splitn(2, '/').collect();
+            if parts.len() != 2 {
+                return Ok(());
+            }
+            info.remote = parts[0].to_string();
+        } else {
+            let key = format!("branch.{}.remote", info.branch);
+            let (rc, remote, err) = git(gitdir, &["config", "--get", &key])?;
+            if rc != 0 {
+                logging::debug(&format!("Error running git config: {}", crate::pyfmt::py_bytes_repr(&err)));
+                return Ok(());
+            }
+            info.remote = bytes_strip(&remote);
+        }
+        let (rc, url, err) = git(gitdir, &["remote", "get-url", &info.remote.clone()])?;
+        if rc != 0 {
+            logging::debug(&format!("Error running git remote get-url: {}", crate::pyfmt::py_bytes_repr(&err)));
+            return Ok(());
+        }
+        info.url = bytes_strip(&url);
+        Ok(())
+    })();
+    if let Err(tb) = res {
+        logging::debug(&format!("Error fetching repo info: {}", tb));
     }
 }

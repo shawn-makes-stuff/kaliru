@@ -429,13 +429,15 @@ impl GCodeMacro {
         let prefix = "variable_";
         for option in config.get_prefix_options(prefix)? {
             let text = config.get(&option, Dflt::Required)?;
-            match crate::pyliteral::literal_eval_json(&text) {
+            match crate::pyliteral::literal_eval_json_noted(&text) {
                 Ok(literal) => {
                     m.variables.borrow_mut().insert(option[prefix.len()..].to_string(), literal);
                 }
-                Err((cls, e)) => {
+                Err(((cls, e), notes)) => {
                     let msg = format!("Option '{}' in section '{}' is not a valid literal: {}", option, config.get_name(), e);
-                    return Err(KError::config(msg).with_context(KError::Py(cls.to_string(), e.to_string())));
+                    // (the exception's notes print below its message)
+                    let text = notes.iter().fold(e, |t, n| t + "\n" + n);
+                    return Err(KError::config(msg).with_context(KError::Py(cls.to_string(), text)));
                 }
             }
         }

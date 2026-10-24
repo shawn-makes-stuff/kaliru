@@ -161,6 +161,95 @@ pub fn py_round(x: f64, ndigits: usize) -> f64 {
     format!("{:.*}", ndigits, x).parse().unwrap_or(x)
 }
 
+const SUGGEST_MOVE_COST: usize = 2;
+const SUGGEST_CASE_COST: usize = 1;
+const SUGGEST_MAX_STRING_SIZE: usize = 40;
+const SUGGEST_MAX_CANDIDATE_ITEMS: usize = 750;
+
+// Python/suggestions.c levenshtein_distance (on the utf-8 bytes)
+fn levenshtein_distance<'a>(mut a: &'a [u8], mut b: &'a [u8], max_cost: usize) -> usize {
+    if a == b {
+        return 0;
+    }
+    while !a.is_empty() && !b.is_empty() && a[0] == b[0] {
+        a = &a[1..];
+        b = &b[1..];
+    }
+    while !a.is_empty() && !b.is_empty() && a[a.len() - 1] == b[b.len() - 1] {
+        a = &a[..a.len() - 1];
+        b = &b[..b.len() - 1];
+    }
+    if a.is_empty() || b.is_empty() {
+        return (a.len() + b.len()) * SUGGEST_MOVE_COST;
+    }
+    if a.len() > SUGGEST_MAX_STRING_SIZE || b.len() > SUGGEST_MAX_STRING_SIZE {
+        return max_cost + 1;
+    }
+    if b.len() < a.len() {
+        std::mem::swap(&mut a, &mut b);
+    }
+    if (b.len() - a.len()) * SUGGEST_MOVE_COST > max_cost {
+        return max_cost + 1;
+    }
+    let cost = |x: u8, y: u8| {
+        if x == y {
+            0
+        } else if x.is_ascii_alphabetic() && y.is_ascii_alphabetic() && x.eq_ignore_ascii_case(&y) {
+            SUGGEST_CASE_COST
+        } else {
+            SUGGEST_MOVE_COST
+        }
+    };
+    let mut buffer: Vec<usize> = (1..=a.len()).map(|i| i * SUGGEST_MOVE_COST).collect();
+    let mut result = 0;
+    for (b_index, &code) in b.iter().enumerate() {
+        result = b_index * SUGGEST_MOVE_COST;
+        let mut distance = result;
+        let mut minimum = usize::MAX;
+        for (index, &ch) in a.iter().enumerate() {
+            let substitute = distance + cost(code, ch);
+            distance = buffer[index];
+            let insert_delete = result.min(distance) + SUGGEST_MOVE_COST;
+            result = insert_delete.min(substitute);
+            buffer[index] = result;
+            minimum = minimum.min(result);
+        }
+        if minimum > max_cost {
+            return max_cost + 1;
+        }
+    }
+    result
+}
+
+/// The "Did you mean" name of a python 3.15 traceback (traceback.py
+/// _compute_suggestion_error via Python/suggestions.c
+/// _Py_CalculateSuggestions): the closest candidate, the first on ties
+pub fn py_suggestion<'a>(candidates: &'a [String], name: &str) -> Option<&'a str> {
+    if candidates.len() >= SUGGEST_MAX_CANDIDATE_ITEMS || name.len() > SUGGEST_MAX_STRING_SIZE {
+        return None;
+    }
+    let mut best: Option<(&str, usize)> = None;
+    for item in candidates {
+        if item == name {
+            continue;
+        }
+        // No more than 1/3 of the involved characters should need changed,
+        // and don't take matches already beaten
+        let mut max_distance = (name.len() + item.len() + 3) * SUGGEST_MOVE_COST / 6;
+        if let Some((_, d)) = best {
+            max_distance = max_distance.min(d - 1);
+        }
+        let d = levenshtein_distance(name.as_bytes(), item.as_bytes(), max_distance);
+        if d > max_distance {
+            continue;
+        }
+        if best.is_none_or(|(_, bd)| d < bd) {
+            best = Some((item, d));
+        }
+    }
+    best.map(|(s, _)| s)
+}
+
 /// Python's str.isspace() for one char (also the `\s` class of `re`):
 /// Rust's char::is_whitespace() plus the \x1c-\x1f separators
 pub fn py_isspace(c: char) -> bool {

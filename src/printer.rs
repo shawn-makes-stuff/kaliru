@@ -26,7 +26,8 @@ use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-pub const APP_NAME: &str = "Kalico";
+/// Rusticc: COSMOS sets APP_NAME to its distro name (kalico_2026.02.00.bb)
+pub const APP_NAME: &str = "Rusticc";
 
 pub const MESSAGE_READY: &str = "Printer is ready";
 

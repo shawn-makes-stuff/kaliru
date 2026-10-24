@@ -819,94 +819,151 @@ fn malformed(n: Option<&Node>) -> LitError {
     }
 }
 
-/// a converted value; Err(type name) marks set / bytes / complex values
-enum Conv {
+/// What ast.literal_eval made: scalars as values, containers kept apart
+/// so json.dumps can be walked like python's encoder (Opaque: a set /
+/// bytes / complex, which json cannot serialize)
+enum Lit {
     V(Value),
-    NotJson(&'static str),
+    Opaque(&'static str),
+    List(Vec<Lit>),
+    Tuple(Vec<Lit>),
+    Dict(Vec<(DictKey, Lit)>),
 }
 
-fn convert_num(n: &Node) -> Result<Conv, LitError> {
+/// A dict key: a value, or a hashable key that is no value (a bytes /
+/// complex, or a tuple holding one: its type name)
+enum DictKey {
+    K(Key),
+    Other(String),
+}
+
+impl Lit {
+    fn type_name(&self) -> String {
+        match self {
+            Lit::V(v) => v.type_name(),
+            Lit::Opaque(t) => t.to_string(),
+            Lit::List(_) => "list".into(),
+            Lit::Tuple(_) => "tuple".into(),
+            Lit::Dict(_) => "dict".into(),
+        }
+    }
+
+    /// hash(self) fails: the type that is not hashable
+    fn unhashable(&self) -> Option<String> {
+        match self {
+            Lit::Opaque("set") | Lit::List(_) | Lit::Dict(_) => Some(self.type_name()),
+            Lit::Tuple(items) => items.iter().find_map(Lit::unhashable),
+            _ => None,
+        }
+    }
+
+    fn as_value(&self) -> Option<Value> {
+        match self {
+            Lit::V(v) => Some(v.clone()),
+            Lit::Tuple(items) => items.iter().map(Lit::as_value).collect::<Option<Vec<_>>>().map(Value::tuple),
+            _ => None,
+        }
+    }
+
+    /// json.dumps(self): the value, else the TypeError message and the
+    /// notes python 3.15's encoder adds on the way out (innermost first)
+    fn to_json(&self) -> Result<Value, (String, Vec<String>)> {
+        let item = |kind: &str, i: String, l: &Lit| {
+            l.to_json().map_err(|(m, mut notes)| {
+                notes.push(format!("when serializing {} item {}", kind, i));
+                (m, notes)
+            })
+        };
+        let key_error = |t: &str| (format!("keys must be str, int, float, bool or None, not {}", t), vec![]);
+        match self {
+            Lit::V(v) => Ok(v.clone()),
+            Lit::Opaque(t) => Err((format!("Object of type {} is not JSON serializable", t), vec![])),
+            Lit::List(items) => {
+                let v = items.iter().enumerate().map(|(i, l)| item("list", i.to_string(), l)).collect::<Result<_, _>>()?;
+                Ok(Value::list(v))
+            }
+            Lit::Tuple(items) => {
+                let v = items.iter().enumerate().map(|(i, l)| item("tuple", i.to_string(), l)).collect::<Result<_, _>>()?;
+                Ok(Value::tuple(v))
+            }
+            Lit::Dict(entries) => {
+                let mut d = IndexMap::new();
+                for (k, l) in entries {
+                    let k = match k {
+                        DictKey::K(k) if matches!(k.0, Value::Tuple(_)) => return Err(key_error("tuple")),
+                        DictKey::K(k) => k,
+                        DictKey::Other(t) => return Err(key_error(t)),
+                    };
+                    d.insert(k.clone(), item("dict", k.0.repr(), l)?);
+                }
+                Ok(Value::dict(d))
+            }
+        }
+    }
+}
+
+fn convert_num(n: &Node) -> Result<Lit, LitError> {
     match n {
-        Node::Const(v @ (Value::Int(_) | Value::Float(_)), _) => Ok(Conv::V(v.clone())),
-        Node::Special("complex", _) => Ok(Conv::NotJson("complex")),
+        Node::Const(v @ (Value::Int(_) | Value::Float(_)), _) => Ok(Lit::V(v.clone())),
+        Node::Special("complex", _) => Ok(Lit::Opaque("complex")),
         other => Err(malformed(Some(other))),
     }
 }
 
-fn convert_signed_num(n: &Node) -> Result<Conv, LitError> {
+fn convert_signed_num(n: &Node) -> Result<Lit, LitError> {
     if let Node::UnaryOp(op @ ('+' | '-'), operand, _) = n {
         let v = convert_num(operand)?;
         return Ok(match (op, v) {
-            ('-', Conv::V(v)) => Conv::V(v.neg().map_err(|_| malformed(Some(n)))?),
+            ('-', Lit::V(v)) => Lit::V(v.neg().map_err(|_| malformed(Some(n)))?),
             (_, v) => v,
         });
     }
     convert_num(n)
 }
 
-fn convert(n: Option<&Node>) -> Result<Conv, LitError> {
+fn convert(n: Option<&Node>) -> Result<Lit, LitError> {
     let Some(n) = n else { return Err(malformed(None)) };
-    let seq = |items: &[Node]| -> Result<Result<Vec<Value>, &'static str>, LitError> {
-        let mut out = vec![];
-        let mut bad = None;
-        for i in items {
-            match convert(Some(i))? {
-                Conv::V(v) => out.push(v),
-                Conv::NotJson(t) => bad = bad.or(Some(t)),
-            }
-        }
-        Ok(match bad {
-            Some(t) => Err(t),
-            None => Ok(out),
-        })
-    };
+    let seq = |items: &[Node]| items.iter().map(|i| convert(Some(i))).collect::<Result<Vec<_>, _>>();
     match n {
-        Node::Const(v, _) => Ok(Conv::V(v.clone())),
-        Node::Special(t, _) => Ok(Conv::NotJson(t)),
-        Node::Tuple(items, _) => Ok(match seq(items)? {
-            Ok(v) => Conv::V(Value::tuple(v)),
-            Err(t) => Conv::NotJson(t),
-        }),
-        Node::List(items, _) => Ok(match seq(items)? {
-            Ok(v) => Conv::V(Value::list(v)),
-            Err(t) => Conv::NotJson(t),
-        }),
+        Node::Const(v, _) => Ok(Lit::V(v.clone())),
+        Node::Special(t, _) => Ok(Lit::Opaque(t)),
+        Node::Tuple(items, _) => Ok(Lit::Tuple(seq(items)?)),
+        Node::List(items, _) => Ok(Lit::List(seq(items)?)),
         Node::Set(items, _) => {
-            let _ = seq(items)?;
-            Ok(Conv::NotJson("set"))
+            seq(items)?;
+            Ok(Lit::Opaque("set"))
         }
-        Node::SetCall(_) => Ok(Conv::NotJson("set")),
+        Node::SetCall(_) => Ok(Lit::Opaque("set")),
         Node::Dict(items, _) => {
-            let mut d = IndexMap::new();
-            let mut bad = None;
+            // dict(zip(map(_convert, keys), map(_convert, values))): pair by
+            // pair, a repeated key keeps its place and takes the new value
+            let mut entries: Vec<(DictKey, Lit)> = Vec::new();
             for (k, v) in items {
                 let k = convert(k.as_ref())?;
                 let v = convert(Some(v))?;
-                match (k, v) {
-                    (Conv::V(k), Conv::V(v)) => {
-                        if let Value::Tuple(_) = k {
-                            bad = bad.or(Some("tuple-key"));
-                        }
-                        let key = Key::hashable(&k).map_err(|e| ("TypeError", e.msg))?;
-                        d.insert(key, v);
-                    }
-                    (Conv::NotJson(t), _) | (_, Conv::NotJson(t)) => bad = bad.or(Some(t)),
+                if let Some(t) = k.unhashable() {
+                    return Err(("TypeError", format!("cannot use '{}' as a dict key (unhashable type: '{}')", k.type_name(), t)));
                 }
+                let key = match k.as_value() {
+                    Some(kv) => DictKey::K(Key::hashable(&kv).map_err(|e| ("TypeError", e.msg))?),
+                    None => DictKey::Other(k.type_name()),
+                };
+                if let DictKey::K(key) = &key {
+                    if let Some(e) = entries.iter_mut().find(|(x, _)| matches!(x, DictKey::K(x) if x == key)) {
+                        e.1 = v;
+                        continue;
+                    }
+                }
+                entries.push((key, v));
             }
-            Ok(match bad {
-                Some(t) => Conv::NotJson(t),
-                None => Conv::V(Value::dict(d)),
-            })
+            Ok(Lit::Dict(entries))
         }
-        Node::BinOp(op @ ('+' | '-'), left, right, _) => {
+        Node::BinOp('+' | '-', left, right, _) => {
             let l = convert_signed_num(left)?;
             let r = convert_num(right)?;
             match (l, r) {
-                (Conv::V(_), Conv::NotJson("complex")) => Ok(Conv::NotJson("complex")),
-                _ => {
-                    let _ = op;
-                    convert_signed_num(n)
-                }
+                (Lit::V(_), Lit::Opaque("complex")) => Ok(Lit::Opaque("complex")),
+                _ => convert_signed_num(n),
             }
         }
         _ => convert_signed_num(n),
@@ -916,6 +973,17 @@ fn convert(n: Option<&Node>) -> Result<Conv, LitError> {
 /// ast.literal_eval(s) followed by json.dumps(literal) (the gcode_macro
 /// variable check); Err is (exception class, message)
 pub fn literal_eval_json(src: &str) -> Result<Value, LitError> {
+    literal_eval_json_noted(src).map_err(|(e, _)| e)
+}
+
+/// literal_eval_json, with the notes json.dumps added to the exception
+/// (traceback lines below the message)
+pub fn literal_eval_json_noted(src: &str) -> Result<Value, (LitError, Vec<String>)> {
+    let lit = literal_eval(src).map_err(|e| (e, vec![]))?;
+    lit.to_json().map_err(|(m, notes)| (("TypeError", m), notes))
+}
+
+fn literal_eval(src: &str) -> Result<Lit, LitError> {
     let src = src.trim_start_matches([' ', '\t']);
     let lx = lex(src)?;
     let mut toks = lx.toks;
@@ -951,9 +1019,56 @@ pub fn literal_eval_json(src: &str) -> Result<Value, LitError> {
     if !matches!(p.peek(), Tok::End) {
         return p.fail();
     }
-    match convert(Some(&node))? {
-        Conv::V(v) => Ok(v),
-        Conv::NotJson("tuple-key") => Err(("TypeError", "keys must be str, int, float, bool or None, not tuple".into())),
-        Conv::NotJson(t) => Err(("TypeError", format!("Object of type {} is not JSON serializable", t))),
+    convert(Some(&node))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ast.literal_eval + json.dumps errors and notes, as CPython 3.15 gives them
+    #[test]
+    fn json_notes() {
+        let cases: &[(&str, Option<(&str, &str, &[&str])>)] = &[
+            ("{1:{2}}", Some(("TypeError", "Object of type set is not JSON serializable", &["when serializing dict item 1"]))),
+            ("[1,{\"a\":(1,{3})}]", Some(("TypeError", "Object of type set is not JSON serializable", &["when serializing tuple item 1", "when serializing dict item 'a'", "when serializing list item 1"]))),
+            ("{(1,2):3}", Some(("TypeError", "keys must be str, int, float, bool or None, not tuple", &[]))),
+            ("{1:{(1,2):3}}", Some(("TypeError", "keys must be str, int, float, bool or None, not tuple", &["when serializing dict item 1"]))),
+            ("({2},)", Some(("TypeError", "Object of type set is not JSON serializable", &["when serializing tuple item 0"]))),
+            ("[{2},{3j}]", Some(("TypeError", "Object of type set is not JSON serializable", &["when serializing list item 0"]))),
+            ("{2:3j}", Some(("TypeError", "Object of type complex is not JSON serializable", &["when serializing dict item 2"]))),
+            ("{\"a\":1, \"b\":{2}}", Some(("TypeError", "Object of type set is not JSON serializable", &["when serializing dict item 'b'"]))),
+            ("b\"x\"", Some(("TypeError", "Object of type bytes is not JSON serializable", &[]))),
+            ("[b\"x\"]", Some(("TypeError", "Object of type bytes is not JSON serializable", &["when serializing list item 0"]))),
+            ("{1:2, (1,2):{3}}", Some(("TypeError", "keys must be str, int, float, bool or None, not tuple", &[]))),
+            ("{1:{2}, 1:3}", None),
+            ("{1:{2}, 1.0:3}", None),
+            ("{{1}:2}", Some(("TypeError", "cannot use 'set' as a dict key (unhashable type: 'set')", &[]))),
+            ("{[1]:2}", Some(("TypeError", "cannot use 'list' as a dict key (unhashable type: 'list')", &[]))),
+            ("{(1,[2]):3}", Some(("TypeError", "cannot use 'tuple' as a dict key (unhashable type: 'list')", &[]))),
+            ("{(1,{2}):3}", Some(("TypeError", "cannot use 'tuple' as a dict key (unhashable type: 'set')", &[]))),
+            ("{b\"x\":1}", Some(("TypeError", "keys must be str, int, float, bool or None, not bytes", &[]))),
+            ("{1j:1}", Some(("TypeError", "keys must be str, int, float, bool or None, not complex", &[]))),
+            ("{(1,b\"x\"):1}", Some(("TypeError", "keys must be str, int, float, bool or None, not tuple", &[]))),
+            ("{(1,2):{3}}", Some(("TypeError", "keys must be str, int, float, bool or None, not tuple", &[]))),
+            ("{\"a\":{1:{2}}}", Some(("TypeError", "Object of type set is not JSON serializable", &["when serializing dict item 1", "when serializing dict item 'a'"]))),
+            ("[1, 2, 3j]", Some(("TypeError", "Object of type complex is not JSON serializable", &["when serializing list item 2"]))),
+            ("1+2j", Some(("TypeError", "Object of type complex is not JSON serializable", &[]))),
+            ("{True:{2}}", Some(("TypeError", "Object of type set is not JSON serializable", &["when serializing dict item True"]))),
+            ("{None:{2}}", Some(("TypeError", "Object of type set is not JSON serializable", &["when serializing dict item None"]))),
+            ("{1.5:{2}}", Some(("TypeError", "Object of type set is not JSON serializable", &["when serializing dict item 1.5"]))),
+            ("{\"a'b\":{2}}", Some(("TypeError", "Object of type set is not JSON serializable", &["when serializing dict item \"a'b\""]))),
+            ("{1:[2,(3,{4})]}", Some(("TypeError", "Object of type set is not JSON serializable", &["when serializing tuple item 1", "when serializing list item 1", "when serializing dict item 1"]))),
+            ("{1:2, {1}:3}", Some(("TypeError", "cannot use 'set' as a dict key (unhashable type: 'set')", &[]))),
+            ("{{1}:{2}}", Some(("TypeError", "cannot use 'set' as a dict key (unhashable type: 'set')", &[]))),
+            ("set()", Some(("TypeError", "Object of type set is not JSON serializable", &[]))),
+            ("[set()]", Some(("TypeError", "Object of type set is not JSON serializable", &["when serializing list item 0"]))),
+        ];
+        for (src, want) in cases {
+            let got = literal_eval_json_noted(src).err();
+            let got = got.as_ref().map(|((c, m), n)| (*c, m.as_str(), n.iter().map(String::as_str).collect::<Vec<_>>()));
+            let want = want.map(|(c, m, n)| (c, m, n.to_vec()));
+            assert_eq!(got, want, "{}", src);
+        }
     }
 }

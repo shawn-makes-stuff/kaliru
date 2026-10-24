@@ -67,6 +67,30 @@ pub trait Kinematics {
 
 pub type LoadKinematics = fn(&Rc<ToolHead>, &ConfigWrapper) -> KResult<Rc<dyn Kinematics>>;
 
+/// The module names importlib discovers in klippy/kinematics (FileFinder
+/// discover: directory order, packages and .py/.pyc files, no __pycache__),
+/// the candidates of a ModuleNotFoundError's "Did you mean"
+pub fn discover_modules() -> Vec<String> {
+    let Ok(dir) = std::fs::read_dir(crate::plugins::klippy_dir().join("kinematics")) else { return Vec::new() };
+    let mut names = Vec::new();
+    for entry in dir.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = entry.path();
+        if name == "__pycache__" {
+            continue;
+        }
+        if path.is_dir() && !name.contains('.') {
+            names.push(format!("klippy.kinematics.{}", name));
+        }
+        if path.is_file() {
+            if let Some(stem) = name.strip_suffix(".py").or_else(|| name.strip_suffix(".pyc")) {
+                names.push(format!("klippy.kinematics.{}", stem));
+            }
+        }
+    }
+    names
+}
+
 /// klippy/kinematics/*.py that have load_kinematics(), None where not
 /// ported yet
 pub static KINEMATICS: &[(&str, Option<LoadKinematics>)] = &[
