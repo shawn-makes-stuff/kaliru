@@ -841,6 +841,7 @@ fn parse_args(argv: &[String]) -> (Options, Vec<String>) {
 
 pub fn main() {
     crate::util::fix_sigint();
+    crate::pcprof::start();
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let (options, args) = parse_args(&argv);
     if options.import_test {
