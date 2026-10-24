@@ -27,6 +27,8 @@ LOG_MASKS = [
     # (repr() of an object: any address, a 32-bit host's are shorter)
     (re.compile(rb" object at 0x[0-9a-f]+>"), b" object at <ADDR>>"),
     (re.compile(rb"\bpid \d+"), b"pid <PID>"),
+    # AFC's logger prefixes its lines with reactor.monotonic() ("%.3f [file:func():line]")
+    (re.compile(rb"^((?:INFO|DEBUG|WARNING|ERROR):root:)\d+\.\d{3} \[", re.M), rb"\1<MONO> ["),
     # util.dump_mcu_build: paths relative to the install dir (klippy/ vs
     # the kaliru binary's dir)
     (re.compile(rb"No build file \S*?/\.\./"), b"No build file <DIR>/../"),

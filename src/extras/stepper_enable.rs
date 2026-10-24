@@ -163,7 +163,7 @@ const CMD_SET_STEPPER_ENABLE_HELP: &str = "Enable/disable individual stepper by 
 // Global stepper enable line tracking
 pub struct PrinterStepperEnable {
     printer: Rc<Printer>,
-    enable_lines: RefCell<IndexMap<String, Rc<EnableTracking>>>,
+    pub(crate) enable_lines: RefCell<IndexMap<String, Rc<EnableTracking>>>,
 }
 
 impl PrinterStepperEnable {

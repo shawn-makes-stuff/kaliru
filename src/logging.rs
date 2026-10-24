@@ -113,6 +113,7 @@ fn format_exception(e: &crate::error::KError) -> String {
             format_exception(context),
             format_exception(err)
         ),
+        crate::error::KError::Foreign(f) if f.traceback.is_some() => f.traceback.as_deref().unwrap().trim_end().to_string(),
         e => traceback(e.py_class(), &e.to_string()),
     }
 }

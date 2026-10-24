@@ -426,10 +426,11 @@ impl ClientConnection {
     }
 
     fn process_request(self: &Rc<Self>, web_request: WebRequest) {
+        let web_request = Rc::new(web_request);
         let res = (|| -> KResult<()> {
             let wh = self.webhooks.upgrade().ok_or_else(|| KError::Other("webhooks gone".into()))?;
             let func = wh.get_callback(web_request.get_method())?;
-            func(&web_request)
+            crate::running::run(&web_request, |w| func(w))
         })();
         if let Err(e) = res {
             if e.is_command_error() {
@@ -661,6 +662,11 @@ impl WebHooks {
         self.sconn.borrow().clone()
     }
 
+    /// the methods clients registered (python plugins read `_remote_methods`)
+    pub fn remote_method_names(&self) -> Vec<String> {
+        self.remote_methods.borrow().keys().cloned().collect()
+    }
+
     pub fn get_callback(&self, path: &str) -> KResult<Endpoint> {
         match self.endpoints.borrow().get(path) {
             Some(cb) => Ok(cb.clone()),
@@ -762,7 +768,8 @@ impl GCodeHelper {
         }
         if !self.is_output_registered.get() {
             let g = self.clone();
-            self.gcode.register_output_handler(Rc::new(move |msg| g.output_callback(msg)));
+            let origin: crate::gcode::CallbackOrigin = (self.clone(), std::any::type_name::<GCodeHelper>());
+            self.gcode.register_output_handler_from(Rc::new(move |msg| g.output_callback(msg)), origin);
             self.is_output_registered.set(true);
         }
         Ok(())

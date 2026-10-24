@@ -16,6 +16,8 @@ pub mod scipy_signal;
 pub mod mcu;
 pub mod msgproto;
 pub mod pins;
+#[cfg(feature = "plugins")]
+pub mod plugins;
 pub mod printer;
 pub mod pyfmt;
 pub mod pyformat;
@@ -26,6 +28,7 @@ pub mod pyglob;
 pub mod pyval;
 pub mod queuelogger;
 pub mod reactor;
+pub mod running;
 pub mod serialhdl;
 pub mod stepper;
 pub mod toolhead;

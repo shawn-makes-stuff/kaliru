@@ -476,9 +476,11 @@ impl PrinterButtons {
         let ppins = self.printer.lookup::<PinsObject>("pins")?;
         let mut mcu_name: Option<String> = None;
         let mut pin_params_list = vec![];
+        let mut chip = None;
         for pin in pins {
             let pin_params = ppins.0.borrow_mut().lookup_pin(pin, true, true, None).map_err(|e| KError::Pins(e.0))?;
             let p = pin_params.borrow();
+            chip = Some(p.chip.clone());
             if mcu_name.as_ref().map(|n| *n != p.chip_name).unwrap_or(false) {
                 return Err(KError::Pins("button pins must be on same mcu".into()));
             }
@@ -486,6 +488,15 @@ impl PrinterButtons {
             pin_params_list.push((p.pin.clone(), p.invert, p.pullup));
         }
         let mcu_name = mcu_name.unwrap_or_default();
+        // a python plugin's chip: MCU_buttons(printer, chip) only registers
+        // its config callback with it
+        if let Some(chip) = chip {
+            let build_config: Rc<dyn Fn() -> KResult<()>> =
+                Rc::new(|| Err(KError::Other("kaliru: button config on a python plugin's chip is not mirrored".into())));
+            if let Some(res) = chip.register_config_callback(build_config) {
+                return res;
+            }
+        }
         // Register pins and callback with the appropriate MCU
         let existing = self.mcu_buttons.borrow().get(&mcu_name).cloned();
         let mcu_buttons = match existing {

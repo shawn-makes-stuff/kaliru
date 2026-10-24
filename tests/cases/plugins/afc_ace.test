@@ -1,0 +1,7 @@
+# AFC + AFC_ACE start up and answer their status commands
+CONFIG afc_ace.cfg
+DICTIONARY atmega2560.dict
+
+G4 P1000
+AFC_STATUS
+M115

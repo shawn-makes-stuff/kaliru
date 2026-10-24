@@ -341,7 +341,7 @@ pub struct ToolHead {
     me: std::rc::Weak<ToolHead>,
     printer: Rc<Printer>,
     reactor: Rc<Reactor>,
-    mcu: Rc<Mcu>,
+    pub(crate) mcu: Rc<Mcu>,
     pub lookahead: RefCell<LookAheadQueue>,
     commanded_pos: RefCell<Vec<f64>>,
     // Velocity and acceleration control
@@ -353,14 +353,14 @@ pub struct ToolHead {
     pub junction_deviation: Cell<f64>,
     pub max_accel_to_decel: Cell<f64>,
     // Input stall detection
-    check_stall_time: Cell<f64>,
+    pub(crate) check_stall_time: Cell<f64>,
     print_stall: Cell<i64>,
     // Input pause tracking
-    can_pause: Cell<bool>,
-    need_check_pause: Cell<f64>,
+    pub(crate) can_pause: Cell<bool>,
+    pub(crate) need_check_pause: Cell<f64>,
     // Print time tracking
-    print_time: Cell<f64>,
-    special_queuing_state: RefCell<&'static str>,
+    pub(crate) print_time: Cell<f64>,
+    pub(crate) special_queuing_state: RefCell<&'static str>,
     priming_timer: RefCell<Option<Timer>>,
     // Setup for generating moves
     motion_queuing: Rc<PrinterMotionQueuing>,

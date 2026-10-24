@@ -51,15 +51,15 @@ pub struct GCodeMove {
     printer: Rc<Printer>,
     is_printer_ready: Cell<bool>,
     // G-Code coordinate manipulation
-    absolute_coord: Cell<bool>,
-    absolute_extrude: Cell<bool>,
-    base_position: RefCell<Vec<f64>>,
-    last_position: RefCell<Vec<f64>>,
-    homing_position: RefCell<Vec<f64>>,
+    pub(crate) absolute_coord: Cell<bool>,
+    pub(crate) absolute_extrude: Cell<bool>,
+    pub(crate) base_position: RefCell<Vec<f64>>,
+    pub(crate) last_position: RefCell<Vec<f64>>,
+    pub(crate) homing_position: RefCell<Vec<f64>>,
     axis_map: RefCell<IndexMap<String, usize>>,
-    speed: Cell<f64>,
-    speed_factor: Cell<f64>,
-    extrude_factor: Cell<f64>,
+    pub(crate) speed: Cell<f64>,
+    pub(crate) speed_factor: Cell<f64>,
+    pub(crate) extrude_factor: Cell<f64>,
     // G-Code state
     saved_states: RefCell<IndexMap<String, SavedState>>,
     move_transform: RefCell<Option<MoveTransformRef>>,
@@ -234,14 +234,14 @@ impl GCodeMove {
         Ok(old_transform)
     }
 
-    fn position_with_transform(&self) -> Vec<f64> {
+    pub(crate) fn position_with_transform(&self) -> Vec<f64> {
         match self.with_transform.borrow().as_ref() {
             Some(t) => t.get_position(),
             None => vec![0.0; 4],
         }
     }
 
-    fn move_with_transform(&self, newpos: &[f64], speed: f64) -> KResult<()> {
+    pub(crate) fn move_with_transform(&self, newpos: &[f64], speed: f64) -> KResult<()> {
         let t = self.with_transform.borrow().clone();
         match t {
             Some(t) => t.move_to(newpos, speed),

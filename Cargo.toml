@@ -58,7 +58,10 @@ rustpython-pylib = { version = "0.4", features = ["freeze-stdlib"], optional = t
 [features]
 # python g-code macros (an embedded RustPython); --no-default-features
 # builds without them
-default = ["python"]
+default = ["python", "plugins"]
+# python plugins (klippy/extras, klippy/plugins modules) on the host's
+# CPython 3.15+, loaded only when a config uses one (docs/PLUGINS.md)
+plugins = []
 python = ["dep:rustpython-vm", "dep:rustpython-stdlib", "dep:rustpython-pylib"]
 
 [profile.release]

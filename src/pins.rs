@@ -35,6 +35,16 @@ fn invalid_pin_name(pin: &str) -> bool {
 /// setup_pin() returns the chip's pin object (MCU_endstop, MCU_digital_out...).
 pub trait PinChip {
     fn setup_pin(&self, pin_type: &str, pin_params: &SharedPinParams) -> std::result::Result<Rc<dyn Any>, String>;
+    /// MCU_buttons(printer, chip) on a chip that is not one of kaliru's MCUs
+    /// (a python plugin's): chip.register_config_callback(build_config).
+    /// None for kaliru's chips, whose buttons go through their MCU
+    fn register_config_callback(&self, _cb: Rc<dyn Fn() -> crate::error::KResult<()>>) -> Option<crate::error::KResult<()>> {
+        None
+    }
+    /// the python object of a plugin's chip (pin_params["chip"])
+    fn python_object(&self) -> Option<Rc<dyn Any>> {
+        None
+    }
 }
 
 /// The pin_params dict. Shared: lookup_pin() hands the same object to every

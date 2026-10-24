@@ -1,0 +1,11 @@
+# AFC + AFC_ACE: a tool change with no ACE attached (load path up to the
+# ACE's absence)
+CONFIG afc_ace_cmds.cfg
+DICTIONARY atmega2560.dict
+
+G4 P1000
+PREP
+G28
+T0
+SHOW_AFC
+M115

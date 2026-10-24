@@ -44,6 +44,10 @@ Printer is halted
 
 pub trait PrinterObject: Any {
     fn as_any(&self) -> &dyn Any;
+    /// the Rust type's path (python plugins find the Kalico class by it)
+    fn type_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
     /// hasattr(obj, "get_status"); override together with get_status()
     fn has_status(&self) -> bool {
         false
@@ -77,6 +81,12 @@ pub trait PrinterObject: Any {
     /// `obj is None`: a module whose load_config returned None
     fn is_none(&self) -> bool {
         false
+    }
+    /// obj.<name>(*args) by name, for objects Rust code only knows as
+    /// printer objects (a python plugin's): None where kaliru's own objects
+    /// are called through their Rust type instead
+    fn call_method(&self, _name: &str, _args: &[PyVal]) -> Option<KResult<PyVal>> {
+        None
     }
     /// not in python: drop references back to the printer / self when the
     /// printer instance ends (see Printer::teardown)
@@ -150,6 +160,10 @@ pub struct Printer {
     objects: RefCell<IndexMap<String, PObj>>,
     /// the PrinterConfig ("configfile" object)
     pub pconfig: RefCell<Option<Rc<ConfigFileObject>>>,
+    /// python modules (klippy/extras files kaliru has no built-in for,
+    /// klippy/plugins): name -> where (Kalico's printer_modules)
+    #[cfg(feature = "plugins")]
+    py_modules: RefCell<IndexMap<String, crate::plugins::Package>>,
 }
 
 /// the "configfile" printer object
@@ -204,6 +218,8 @@ impl Printer {
             components: SubsystemComponentCollection { subsystems: RefCell::new(IndexMap::new()) },
             objects: RefCell::new(IndexMap::new()),
             pconfig: RefCell::new(None),
+            #[cfg(feature = "plugins")]
+            py_modules: RefCell::new(IndexMap::new()),
         });
         let p = printer.clone();
         main_reactor.register_callback(move |e| p.connect(e), NOW);
@@ -322,6 +338,17 @@ impl Printer {
         }
         // create objects entry from module
         let module_name = section.split_whitespace().next().unwrap_or("");
+        #[cfg(feature = "plugins")]
+        if let Some(package) = self.py_modules.borrow().get(module_name).cloned() {
+            crate::plugins::set_printer(self);
+            let obj = match crate::plugins::load_config(config, section, &package)? {
+                Some(o) => o,
+                None if !required => return Ok(None),
+                None => return Err(KError::config(format!("Unable to load module '{}'", module_name))),
+            };
+            self.objects.borrow_mut().insert(section.to_string(), obj.clone());
+            return Ok(Some(obj));
+        }
         let Some(pm) = crate::extras::MODULES.iter().find(|m| m.name == module_name) else {
             // unable to find that module
             if !required {
@@ -360,9 +387,13 @@ impl Printer {
             Some("Overwrite config file and restart"),
         )?;
         let config = pobj.pconfig.borrow_mut().read_main_config()?.with_printer(self);
-        // _load_modules: allow_plugin_override is checked so python can
-        // raise for modules in both extras and plugins; kaliru has no plugins
-        let _allow_overrides = config.getsection("danger_options").getboolean_value_nv("allow_plugin_override", false)?;
+        // _load_modules: the built-in modules are kaliru's; python modules
+        // come from klippy/extras (third-party files) and klippy/plugins
+        let allow_overrides = config.getsection("danger_options").getboolean_value_nv("allow_plugin_override", false)?;
+        #[cfg(feature = "plugins")]
+        self.load_py_modules(allow_overrides)?;
+        #[cfg(not(feature = "plugins"))]
+        let _ = allow_overrides;
         self.load_object(&config, "danger_options", true)?;
         if self.bglogger.is_some() && crate::extras::danger_options::get_danger_options().log_config_file_at_startup {
             let text = pobj.pconfig.borrow().log_config(&config);
@@ -566,9 +597,53 @@ impl Printer {
         Ok(())
     }
 
+    /// Kalico's _load_modules for python modules: klippy/extras files
+    /// kaliru has no built-in for, then klippy/plugins (a name in both is an
+    /// error unless allow_plugin_override)
+    #[cfg(feature = "plugins")]
+    fn load_py_modules(&self, allow_overrides: bool) -> KResult<()> {
+        use crate::plugins::{list_modules, Package};
+        let mut mods = IndexMap::new();
+        let builtin = |n: &str| crate::extras::MODULES.iter().any(|m| m.name == n);
+        for name in list_modules(&Package::Extras) {
+            if !builtin(&name) {
+                mods.insert(name, Package::Extras);
+            }
+        }
+        for name in list_modules(&Package::Plugins) {
+            if (builtin(&name) || mods.contains_key(&name)) && !allow_overrides {
+                return Err(KError::config(format!("Module '{}' found in both extras and plugins!", name)));
+            }
+            mods.insert(name, Package::Plugins);
+        }
+        *self.py_modules.borrow_mut() = mods;
+        Ok(())
+    }
+
+    /// printer.objects[name] = obj (python plugins: a dict assignment keeps
+    /// the position of an existing name)
+    #[cfg(feature = "plugins")]
+    pub fn objects_set(&self, name: &str, obj: PObj) {
+        self.objects.borrow_mut().insert(name.to_string(), obj);
+    }
+
+    /// printer.objects.pop(name)
+    #[cfg(feature = "plugins")]
+    pub fn objects_remove(&self, name: &str) -> Option<PObj> {
+        self.objects.borrow_mut().shift_remove(name)
+    }
+
+    /// list(printer.objects)
+    #[cfg(feature = "plugins")]
+    pub fn object_names(&self) -> Vec<String> {
+        self.objects.borrow().keys().cloned().collect()
+    }
+
     /// not in python (garbage collected there): drop the objects and
     /// handlers that hold Rc<Printer>, after the reactor was finalized
     pub fn teardown(&self) {
+        #[cfg(feature = "plugins")]
+        crate::plugins::teardown();
         let objects: Vec<PObj> = self.objects.borrow().values().cloned().collect();
         for o in objects {
             o.teardown();

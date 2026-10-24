@@ -1,0 +1,16 @@
+# AFC + AFC_ACE: AFC's PAUSE/RESUME wrappers (after PREP renames them),
+# unload with nothing loaded, failure reset, runout lane setting
+CONFIG afc_ace_cmds.cfg
+DICTIONARY atmega2560.dict
+
+G4 P1000
+PREP
+PAUSE
+SHOW_AFC
+RESUME
+TOOL_UNLOAD
+RESET_FAILURE
+AFC_RESUME
+SET_RUNOUT LANE=lane1 RUNOUT=lane2
+SHOW_AFC
+M115

@@ -1,0 +1,22 @@
+[package]
+name = "kaliru-pybridge"
+version = "0.1.0"
+edition = "2021"
+description = "Python plugin support for kaliru (CPython bridge)"
+license = "GPL-3.0-only"
+
+[dependencies]
+kaliru = { path = "..", default-features = false }
+libc = "0.2"
+
+[[bin]]
+name = "proto"
+path = "src/bin/proto.rs"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+
+[patch.crates-io]
+corosensei = { path = "../vendor/corosensei" }

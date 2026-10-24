@@ -37,6 +37,14 @@ pub trait DefinedSensor {
 }
 
 
+/// runout_gcode / insert_gcode: a template, or whatever a python plugin
+/// put there (AFC sets runout_gcode = 1 and takes the runout itself)
+#[derive(Clone)]
+pub enum GcodeSlot {
+    Template(Rc<Template>),
+    Plugin(crate::printer::PObj),
+}
+
 pub struct RunoutHelper {
     me: Weak<RunoutHelper>,
     pub name: String,
@@ -44,14 +52,14 @@ pub struct RunoutHelper {
     printer: Rc<Printer>,
     reactor: Rc<Reactor>,
     gcode: Rc<GCodeDispatch>,
-    runout_pause: bool,
-    runout_gcode: Option<Rc<Template>>,
+    pub runout_pause: Cell<bool>,
+    pub runout_gcode: RefCell<Option<GcodeSlot>>,
     pub immediate_runout_gcode: RefCell<Option<Rc<Template>>>,
-    insert_gcode: Option<Rc<Template>>,
+    pub insert_gcode: RefCell<Option<GcodeSlot>>,
     pause_delay: f64,
-    event_delay: f64,
+    pub event_delay: Cell<f64>,
     pub runout_distance: Cell<f64>,
-    min_event_systime: Cell<f64>,
+    pub min_event_systime: Cell<f64>,
     pub filament_present: Cell<bool>,
     pub sensor_enabled: Cell<bool>,
     pub smart: Cell<bool>,
@@ -92,12 +100,12 @@ impl RunoutHelper {
             printer: printer.clone(),
             reactor: reactor.clone(),
             gcode: gcode.clone(),
-            runout_pause,
-            runout_gcode,
+            runout_pause: Cell::new(runout_pause),
+            runout_gcode: RefCell::new(runout_gcode.map(GcodeSlot::Template)),
             immediate_runout_gcode: RefCell::new(None),
-            insert_gcode,
+            insert_gcode: RefCell::new(insert_gcode.map(GcodeSlot::Template)),
             pause_delay,
-            event_delay,
+            event_delay: Cell::new(event_delay),
             runout_distance: Cell::new(runout_distance),
             // Internal state
             min_event_systime: Cell::new(NEVER),
@@ -150,9 +158,14 @@ impl RunoutHelper {
     }
 
     fn runout_event_handler(&self, eventtime: f64) -> KResult<()> {
+        // a python plugin may have replaced it (AFC does)
+        #[cfg(feature = "plugins")]
+        if let Some(r) = crate::plugins::dispatch(self, "klippy.extras.filament_switch_sensor.RunoutHelper._runout_event_handler", &[&eventtime]) {
+            return r.map(|_| ());
+        }
         let immediate = self.immediate_runout_gcode.borrow().clone();
         if let Some(t) = immediate {
-            self.exec_gcode("", &t);
+            self.exec_gcode("", &GcodeSlot::Template(t));
         }
         // Pausing from inside an event requires that the pause portion
         // of pause_resume execute immediately.
@@ -177,17 +190,18 @@ impl RunoutHelper {
 
     fn execute_runout(&self, eventtime: f64) -> KResult<()> {
         let mut pause_prefix = "";
-        if self.runout_pause {
+        if self.runout_pause.get() {
             let pause_resume = self.printer.lookup::<PauseResume>("pause_resume")?;
             pause_resume.send_pause_command()?;
             pause_prefix = "PAUSE\n";
             self.printer.get_reactor().pause(eventtime + self.pause_delay)?;
         }
-        if let Some(t) = self.runout_gcode.clone() {
+        let runout_gcode = self.runout_gcode.borrow().clone();
+        if let Some(t) = runout_gcode {
             self.exec_gcode(pause_prefix, &t);
         } else {
             logging::exception_err("Script running error", &KError::Other("'NoneType' object has no attribute 'render'".into()));
-            self.min_event_systime.set(self.reactor.monotonic() + self.event_delay);
+            self.min_event_systime.set(self.reactor.monotonic() + self.event_delay.get());
         }
         self.reset_runout_distance_info();
         Ok(())
@@ -220,15 +234,32 @@ impl RunoutHelper {
         }
     }
 
-    fn exec_gcode(&self, prefix: &str, template: &Template) {
-        let r = template.render(None).and_then(|s| self.gcode.run_script(&format!("{}{}\nM400", prefix, s)));
+    fn exec_gcode(&self, prefix: &str, template: &GcodeSlot) {
+        let rendered = match template {
+            GcodeSlot::Template(t) => t.render(None),
+            // template.render() on a python plugin's object
+            GcodeSlot::Plugin(p) => match p.call_method("render", &[]) {
+                Some(r) => r.map(|v| v.str()),
+                None => Err(KError::Other("object has no attribute 'render'".into())),
+            },
+        };
+        let r = rendered.and_then(|s| self.gcode.run_script(&format!("{}{}\nM400", prefix, s)));
         if let Err(e) = r {
             logging::exception_err("Script running error", &e);
         }
-        self.min_event_systime.set(self.reactor.monotonic() + self.event_delay);
+        self.min_event_systime.set(self.reactor.monotonic() + self.event_delay.get());
     }
 
     pub fn note_filament_present(&self, eventtime: f64, is_filament_present: Option<bool>, force: bool, immediate: bool) -> KResult<()> {
+        // a python plugin may have replaced it (AFC's debounced handler)
+        #[cfg(feature = "plugins")]
+        if let Some(r) = crate::plugins::dispatch(
+            self,
+            "klippy.extras.filament_switch_sensor.RunoutHelper.note_filament_present",
+            &[&eventtime, &is_filament_present, &force, &immediate],
+        ) {
+            return r.map(|_| ());
+        }
         let is_filament_present = is_filament_present.unwrap_or(self.filament_present.get());
         if is_filament_present == self.filament_present.get() && !force {
             return Ok(());
@@ -260,21 +291,22 @@ impl RunoutHelper {
             if self.smart.get() { state_of("print_stats")? == "printing" } else { state_of("idle_timeout")? == "Printing" };
         // Perform filament action associated with status change (if any)
         if is_filament_present {
-            if !is_printing && self.insert_gcode.is_some() {
+            if !is_printing && self.insert_gcode.borrow().is_some() {
                 // insert detected
                 self.min_event_systime.set(NEVER);
                 logging::info(&format!("Filament Sensor {}: insert event detected, Time {:.2}", self.name, now));
                 let r = self.rc();
                 self.reactor.register_callback(
                     move |_| {
-                        if let Some(t) = r.insert_gcode.clone() {
+                        let insert_gcode = r.insert_gcode.borrow().clone();
+                        if let Some(t) = insert_gcode {
                             r.exec_gcode("", &t);
                         }
                     },
                     NOW,
                 );
             }
-        } else if is_printing && self.runout_gcode.is_some() {
+        } else if is_printing && self.runout_gcode.borrow().is_some() {
             // runout detected
             self.min_event_systime.set(NEVER);
             logging::info(&format!("Filament Sensor {}: runout event detected, Time {:.2}", self.name, now));

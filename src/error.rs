@@ -15,7 +15,28 @@
 //              (trad_rack's TradRackLoadError, SelectorNotHomedError)
 //   Reactor    reactor.ReactorError
 //   Other      any other exception (str(e) only)
+//   Foreign    an exception object from a python plugin (src/plugins/): it
+//              behaves as its nearest kind above and re-raises as itself
 use std::fmt;
+use std::rc::Rc;
+
+/// A python plugin's exception crossing kaliru code
+pub struct ForeignError {
+    /// what kaliru code sees: the nearest klippy class above, with str(e)
+    pub kind: KError,
+    /// the qualified class name tracebacks print
+    pub class: String,
+    /// the exception object itself (src/plugins keeps the python reference)
+    pub obj: Box<dyn std::any::Any>,
+    /// traceback.format_exception() of it, for the log
+    pub traceback: Option<String>,
+}
+
+impl fmt::Debug for ForeignError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "ForeignError({}: {:?})", self.class, self.kind)
+    }
+}
 
 #[derive(Clone, Debug)]
 pub enum KError {
@@ -37,12 +58,14 @@ pub enum KError {
     /// an error raised while handling another: (error, its __context__).
     /// It behaves as the error; tracebacks print the context first
     Chained(Box<KError>, Box<KError>),
+    Foreign(Rc<ForeignError>),
 }
 
 impl KError {
     pub fn message(&self) -> &str {
         match self {
             KError::Chained(e, _) => e.message(),
+            KError::Foreign(f) => f.kind.message(),
             KError::Config(m)
             | KError::Pins(m)
             | KError::Protocol(m)
@@ -72,6 +95,7 @@ impl KError {
     pub fn base(&self) -> &KError {
         match self {
             KError::Chained(e, _) => e.base(),
+            KError::Foreign(f) => f.kind.base(),
             e => e,
         }
     }
@@ -93,6 +117,7 @@ impl KError {
             KError::Py(class, _) => class,
             KError::Other(_) => "Exception",
             KError::Chained(e, _) => e.py_class(),
+            KError::Foreign(f) => &f.class,
         }
     }
 

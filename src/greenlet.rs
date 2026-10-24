@@ -7,7 +7,7 @@
 // through a trampoline on the main stack: a greenlet yields (target, value)
 // and the trampoline resumes the target with value. Only the main context
 // (the code calling the reactor's run()) runs the trampoline.
-use corosensei::stack::DefaultStack;
+use corosensei::stack::{DefaultStack, Stack};
 use corosensei::{Coroutine, CoroutineResult, Yielder};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -24,7 +24,21 @@ pub struct Greenlet {
     coro: RefCell<Option<Coroutine<f64, (Target, f64), (), DefaultStack>>>,
     yielder: Rc<Cell<*const Yld>>,
     dead: Cell<bool>,
+    /// usable stack (lowest address, size), guard page excluded
+    stack: (usize, usize),
 }
+
+/// What a switch hook is told, on the main stack, around every switch
+pub enum SwitchEvent<'a> {
+    /// this greenlet is about to run
+    Enter(&'a Greenlet),
+    /// the main context runs again
+    Main,
+    /// this greenlet finished or was killed
+    Dead(&'a Greenlet),
+}
+
+pub type SwitchHook = fn(SwitchEvent);
 
 pub type G = Rc<Greenlet>;
 
@@ -38,6 +52,20 @@ pub enum Target {
 thread_local! {
     // the running greenlet; None while the main context runs
     static CURRENT: RefCell<Option<G>> = const { RefCell::new(None) };
+    // per-context state that follows the running greenlet (python plugins:
+    // one python thread state per greenlet)
+    static HOOK: Cell<Option<SwitchHook>> = const { Cell::new(None) };
+}
+
+/// Install the switch hook of this thread (None removes it)
+pub fn set_switch_hook(hook: Option<SwitchHook>) {
+    HOOK.with(|h| h.set(hook));
+}
+
+fn notify(ev: SwitchEvent) {
+    if let Some(hook) = HOOK.with(|h| h.get()) {
+        hook(ev);
+    }
 }
 
 impl Greenlet {
@@ -47,23 +75,36 @@ impl Greenlet {
         let yielder: Rc<Cell<*const Yld>> = Rc::new(Cell::new(std::ptr::null()));
         let y = yielder.clone();
         let stack = DefaultStack::new(STACK_SIZE).expect("greenlet stack");
+        // limit() includes the guard page
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+        let lo = stack.limit().get() + page;
+        let bounds = (lo, stack.base().get() - lo);
         let coro = Coroutine::with_stack(stack, move |yielder: &Yld, _first: f64| {
             y.set(yielder as *const Yld);
             run();
         });
-        Rc::new(Greenlet { coro: RefCell::new(Some(coro)), yielder, dead: Cell::new(false) })
+        Rc::new(Greenlet { coro: RefCell::new(Some(coro)), yielder, dead: Cell::new(false), stack: bounds })
     }
 
     pub fn is_dead(&self) -> bool {
         self.dead.get()
     }
 
+    /// The usable stack: (lowest address, size in bytes)
+    pub fn stack(&self) -> (usize, usize) {
+        self.stack
+    }
+
     /// greenlet.throw() on a suspended greenlet: unwinds its stack (running
     /// drops) and marks it dead. Must not be called on the running greenlet.
     pub fn kill(&self) {
         let coro = self.coro.borrow_mut().take();
+        // the unwind runs on this greenlet's stack
+        notify(SwitchEvent::Enter(self));
         drop(coro);
+        notify(SwitchEvent::Main);
         self.dead.set(true);
+        notify(SwitchEvent::Dead(self));
     }
 }
 
@@ -97,12 +138,14 @@ fn trampoline(mut target: Target, mut value: f64) -> f64 {
             Target::G(g) => g,
         };
         CURRENT.with(|c| *c.borrow_mut() = Some(g.clone()));
+        notify(SwitchEvent::Enter(&g));
         let res = {
             let mut coro = g.coro.borrow_mut();
             let coro = coro.as_mut().expect("switch to a dead greenlet");
             coro.resume(value)
         };
         CURRENT.with(|c| *c.borrow_mut() = None);
+        notify(SwitchEvent::Main);
         match res {
             CoroutineResult::Yield((t, v)) => {
                 target = t;
@@ -112,6 +155,7 @@ fn trampoline(mut target: Target, mut value: f64) -> f64 {
                 // a finished greenlet switches to its parent (the main context)
                 g.dead.set(true);
                 g.coro.borrow_mut().take();
+                notify(SwitchEvent::Dead(&g));
                 target = Target::Main;
                 value = f64::NAN;
             }

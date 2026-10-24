@@ -553,6 +553,10 @@ impl Reactor {
             .iter()
             .map(|(&fd, &events)| libc::pollfd { fd, events, revents: 0 })
             .collect();
+        // python plugins: other python threads run while the reactor waits
+        #[cfg(feature = "plugins")]
+        let n = crate::plugins::allow_threads(|| unsafe { libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, timeout_ms) });
+        #[cfg(not(feature = "plugins"))]
         let n = unsafe { libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, timeout_ms) };
         if n <= 0 {
             // ponytail: python raises on poll errors other than EINTR (which it retries)

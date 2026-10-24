@@ -382,7 +382,7 @@ impl ConfigWrapper {
         Ok(("gcode", value.to_string()))
     }
 
-    fn getint_value(&self, option: &str, default: &Dflt, lim: &Lim) -> Result<Option<PyVal>> {
+    pub fn getint_value(&self, option: &str, default: &Dflt, lim: &Lim) -> Result<Option<PyVal>> {
         let section = self.section.clone();
         self.get_wrapper(|fc| Ok(PyVal::from(fc.getint(&section, option)?)), option, default, lim)
     }
@@ -413,7 +413,7 @@ impl ConfigWrapper {
         Ok(self.getfloat_value(option, &Dflt::None, &lim)?.map(|v| num(&v)))
     }
 
-    fn getboolean_value(&self, option: &str, default: &Dflt, note_valid: bool) -> Result<Option<PyVal>> {
+    pub fn getboolean_value(&self, option: &str, default: &Dflt, note_valid: bool) -> Result<Option<PyVal>> {
         let lim = Lim { note_valid, ..Lim::default() };
         let section = self.section.clone();
         self.get_wrapper(|fc| Ok(PyVal::from(fc.getboolean(&section, option)?)), option, default, &lim)
@@ -518,6 +518,28 @@ impl ConfigWrapper {
 
     /// a wrapper of one section whose options are `contents` (the indx
     /// compat.ConfigWrapper): own access tracking, same printer
+/// ConfigWrapper(printer, fileconfig, access_tracking, section) built by a
+    /// python plugin (src/plugins): the deprecation list is the printer's
+    pub fn from_parts(
+        printer: &Rc<crate::printer::Printer>,
+        fileconfig: Rc<RefCell<RawConfigParser>>,
+        access_tracking: Rc<RefCell<AccessTracking>>,
+        section: &str,
+    ) -> ConfigWrapper {
+        let deprecated = printer
+            .pconfig
+            .borrow()
+            .as_ref()
+            .map(|c| c.pconfig.borrow().deprecated.clone())
+            .unwrap_or_default();
+        ConfigWrapper { fileconfig, access_tracking, section: section.to_string(), deprecated, printer: Rc::downgrade(printer) }
+    }
+
+    /// An empty parser like python's RawConfigParser() (plugins build their own)
+    pub fn empty_fileconfig() -> RawConfigParser {
+        RawConfigParser::new(true, &[], Box::new(crate::configparser::NoInterpolation))
+    }
+
     pub fn synthetic(&self, section: &str, contents: &[(&str, String)]) -> ConfigWrapper {
         let mut fc = RawConfigParser::new(true, &[], Box::new(crate::configparser::NoInterpolation));
         let _ = fc.add_section(section);

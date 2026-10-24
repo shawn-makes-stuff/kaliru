@@ -519,9 +519,9 @@ pub struct Heater {
     smooth_time: Cell<f64>,
     inv_smooth_time: Cell<f64>,
     verify_mainthread_time: Cell<f64>,
-    last_temp: Cell<f64>,
-    smoothed_temp: Cell<f64>,
-    target_temp: Cell<f64>,
+    pub(crate) last_temp: Cell<f64>,
+    pub(crate) smoothed_temp: Cell<f64>,
+    pub(crate) target_temp: Cell<f64>,
     last_temp_time: Cell<f64>,
     next_pwm_time: Cell<f64>,
     pub last_pwm_value: Cell<f64>,
@@ -1451,10 +1451,27 @@ const TEMPERATURE_SENSORS_FILENAME: &str = "klippy/extras/temperature_sensors.cf
 const CMD_TURN_OFF_HEATERS_HELP: &str = "Turn off all heaters";
 const CMD_TEMPERATURE_WAIT_HELP: &str = "Wait for a temperature on a sensor";
 
+/// An entry of PrinterHeaters.heaters: kaliru's heater, or a python
+/// plugin's object a plugin put there (an ACE dryer)
+#[derive(Clone)]
+pub enum HeaterSlot {
+    Kaliru(Rc<Heater>),
+    Plugin(PObj),
+}
+
+impl HeaterSlot {
+    pub fn as_pobj(&self) -> PObj {
+        match self {
+            HeaterSlot::Kaliru(h) => h.clone(),
+            HeaterSlot::Plugin(p) => p.clone(),
+        }
+    }
+}
+
 pub struct PrinterHeaters {
     printer: Rc<Printer>,
     sensor_factories: RefCell<IndexMap<String, SensorFactory>>,
-    pub heaters: RefCell<IndexMap<String, Rc<Heater>>>,
+    pub heaters: RefCell<IndexMap<String, HeaterSlot>>,
     gcode_id_to_sensor: RefCell<IndexMap<String, PObj>>,
     available_heaters: RefCell<Vec<String>>,
     available_sensors: RefCell<Vec<String>>,
@@ -1551,7 +1568,7 @@ impl PrinterHeaters {
         // (DualSensorHeater's "dual_loop_pid requires a secondary sensor"
         // cannot trigger: lookup_object raises first)
         let heater = Heater::new(config, sensor, inner_sensor)?;
-        self.heaters.borrow_mut().insert(heater_name, heater.clone());
+        self.heaters.borrow_mut().insert(heater_name, HeaterSlot::Kaliru(heater.clone()));
         self.register_sensor(config, heater.clone(), gcode_id)?;
         self.available_heaters.borrow_mut().push(config.get_name().to_string());
         Ok(heater)
@@ -1566,7 +1583,31 @@ impl PrinterHeaters {
             Some((_, rest)) => rest,
             None => heater_name,
         };
-        self.heaters.borrow().get(name).cloned().ok_or_else(|| KError::config(format!("Unknown heater '{}'", name)))
+        match self.heaters.borrow().get(name) {
+            Some(HeaterSlot::Kaliru(h)) => Ok(h.clone()),
+            // kaliru code cannot drive a python plugin's heater by its type
+            Some(HeaterSlot::Plugin(_)) => Err(KError::config(format!("Heater '{}' is a python plugin's object", name))),
+            None => Err(KError::config(format!("Unknown heater '{}'", name))),
+        }
+    }
+
+    /// lookup_heater() as python sees it: whatever object is registered
+    pub fn lookup_heater_obj(&self, heater_name: &str) -> KResult<PObj> {
+        let name = match heater_name.split_once(' ') {
+            Some((_, rest)) => rest,
+            None => heater_name,
+        };
+        self.heaters.borrow().get(name).map(|s| s.as_pobj()).ok_or_else(|| KError::config(format!("Unknown heater '{}'", name)))
+    }
+
+    /// available_heaters / available_sensors / available_monitors (python plugins append to them)
+    pub fn name_list(&self, which: &str) -> Option<&RefCell<Vec<String>>> {
+        match which {
+            "available_heaters" => Some(&self.available_heaters),
+            "available_sensors" => Some(&self.available_sensors),
+            "available_monitors" => Some(&self.available_monitors),
+            _ => None,
+        }
     }
 
     pub fn setup_sensor(&self, config: &ConfigWrapper) -> KResult<Rc<dyn TempSensor>> {
@@ -1602,9 +1643,16 @@ impl PrinterHeaters {
     }
 
     pub fn turn_off_all_heaters(&self) -> KResult<()> {
-        let heaters: Vec<Rc<Heater>> = self.heaters.borrow().values().cloned().collect();
+        let heaters: Vec<HeaterSlot> = self.heaters.borrow().values().cloned().collect();
         for heater in heaters {
-            heater.set_temp(0.0)?;
+            match heater {
+                HeaterSlot::Kaliru(h) => h.set_temp(0.0)?,
+                HeaterSlot::Plugin(p) => {
+                    if let Some(res) = p.call_method("set_temp", &[PyVal::Float(0.0)]) {
+                        res?;
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -1680,7 +1728,7 @@ impl PrinterHeaters {
         }
         let heater = self.heaters.borrow().get(&sensor_name).cloned();
         let sensor: PObj = match heater {
-            Some(h) => h,
+            Some(h) => h.as_pobj(),
             None => self.printer.lookup_object(&sensor_name)?,
         };
         self.printer.wait_while(
@@ -1715,7 +1763,9 @@ impl PrinterObject for PrinterHeaters {
     }
     fn teardown(&self) {
         for h in self.heaters.borrow().values() {
-            h.teardown();
+            if let HeaterSlot::Kaliru(h) = h {
+                h.teardown();
+            }
         }
         self.heaters.borrow_mut().clear();
         self.gcode_id_to_sensor.borrow_mut().clear();

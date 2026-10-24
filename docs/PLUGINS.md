@@ -172,6 +172,124 @@ plugins.
 - **Parity:** the existing harnesses (live_cmp with linux MCU processes, case/suite) run each plugin config on
   Python Kalico and on kaliru+bridge. The serialqueue trace and the masked log must match.
 
+## Step 1 results: prototype (`pybridge/`, branch `plugins`, 2026-10-24)
+
+`pybridge/src/bin/proto.rs` embeds CPython 3.15.1 (uv build, `PYTHON_LIBDIR`) and runs Python on two kaliru
+greenlets. `pybridge/src/greenlets.rs` is the switch hook; `src/greenlet.rs` gained `set_switch_hook` and
+`Greenlet::stack()`.
+
+| check | result |
+|---|---|
+| g1 suspended 50 Python frames deep inside an `except` block; g2 runs, then switches back | OK: frames, return values (55, 307) and g1's `sys.exception()` intact |
+| g2 does not see g1's exception state | OK |
+| C recursion (`list(map(f, ...))`, recursion limit 10^7) on a 1 MiB greenlet stack | RecursionError, no crash |
+| Python thread while kaliru holds the GIL (busy 50 ms) vs while it is released (poll) | thread never ran in the held window, finished in the released one |
+| **control:** no switch hook (one thread state for all greenlets) | segfault |
+| **control:** swap thread states but no `SetStackProtection` | segfault |
+| armv7 (cross-built, qemu-arm) | same checks pass |
+
+Both pieces are required, so **CPython ≥ 3.15 is the minimum for plugins**. Older versions would need greenlet's
+version-specific tstate patching.
+
+Costs measured on x86_64 (CPython 3.15.1):
+
+| item | cost |
+|---|---|
+| interpreter start | +2.4 MB anon (1.7 → 4.1 MB), +6.8 MB file-backed (libpython, shared) |
+| Python → Rust call (`METH_FASTCALL`, no args) | 0.063 µs (a Python → Python call: 0.054 µs) |
+| Rust → Python call (`PyObject_CallNoArgs`) | 0.024 µs |
+| thread-state swap per greenlet switch (Enter + Main) | 0.093 µs |
+
+On the CC1 itself (user's OK, printer idle; binary in /data/kt, removed afterwards; COSMOS's own CPython 3.15.0,
+Cortex-A7):
+
+| item | cost |
+|---|---|
+| all checks | greenlets OK, thread OK; `noswap` control segfaults (exit 139) |
+| interpreter start | +1.7 MB anon (0.4 → 2.1 MB), +3.1 MB file-backed |
+| after the greenlet and thread tests | 4.2 MB anon in total (includes the 1 MiB greenlet stack the C-recursion test touched) |
+| Python → Rust call | 1.94 µs (a Python → Python call: 1.60 µs) |
+| Rust → Python call | 0.82 µs |
+| thread-state swap per greenlet switch | 2.5 µs |
+
+qemu-arm numbers are not used: qemu's own RSS is counted, and the timing is emulation speed.
+
+The GIL model was tested as designed:
+- the reactor thread keeps the GIL except while it blocks in poll;
+- while Python bytecode runs, CPython's 5 ms switch interval lets threads run, as in Kalico.
+
+Plugin threads therefore run only at points where they could also run under Kalico.
+
+## Status (2026-10-24, branch `plugins`)
+
+### AFC + AFC_ACE run identically to Kalico
+
+`tools/plugin_cmp.sh` runs three cases, all identical to Kalico (serial trace, exit code, masked log):
+
+| Case | What it covers |
+|---|---|
+| `basic` | the test plugin |
+| `afc_ace` | AFC + AFC_ACE start-up through ready |
+| `afc_ace_cmds` | lane settings, filament sensors, mapping, `PREP` (about 1,700 log lines), `AFC_M104`, AFC's status read from Jinja |
+
+Both sides run on CPython 3.15 with the same packages: the reference uses `~/rk/venv315`, and kaliru gets that venv's site-packages.
+
+There is no regression without plugins: stock suite 87/88 (`printers/13` timing, as before), cases 62/62.
+
+### How the layer is built (`src/plugins/`)
+
+**Python start-up**
+- `capi.rs` loads libpython at run time.
+- `greenlets.rs` gives each greenlet its own thread state. The greenlet Python starts in keeps the starting thread state.
+- `gil.rs` holds the layer's tables as GIL-guarded statics.
+
+**The mirror**
+- `tools/gen_mirror.py` generates `mirror/*.py` and `mirror.bin` from Kalico. It covers 208 modules and 7,489 IDs; 39 methods are copied verbatim (`tools/mirror_verbatim.txt`): all of ConfigWrapper and GCodeCommand, and mathutil.
+- `prelude.py` provides:
+  - Object, Meta and Attr. An object with no kaliru object behind it is plain Python.
+  - The import finder and compat aliases.
+  - Logging to klippy.log.
+  - Live views: FileConfig, AccessTracking, ObjectsView, ListView and DictView.
+  - `overridden()`.
+
+**Bridge to kaliru**
+- `native.rs` holds the `_kaliru` module, the handler registry, and the List/Dict fields.
+- The BYPASS stack lets a plugin's replacement call the original method.
+- `objects.rs` keeps one Python object per kaliru object. The class is found from the Rust type path. Casters keep printer objects usable when they reach Python as a plain object.
+- `py.rs` converts errors both ways (`KError::Foreign` keeps the Python exception and its traceback). `convert.rs` holds ToPy/FromPy and the method!/function!/cell_attr!/ro_attr!/vec_attr! macros.
+- `dispatch()` lets kaliru methods honour a plugin's replacement. It is wired for `RunoutHelper.note_filament_present` and `_runout_event_handler`.
+
+**Handlers (`impls/`)**
+
+printer, configfile, gcode, reactor, webhooks, pins (Python pin chips), buttons, heaters (plugin heaters in `heaters`), filament_switch_sensor, gcode_move, idle_timeout, heaters.Heater, toolhead, PrinterExtruder.
+
+**Supporting changes in kaliru's core**
+
+| Change | Where |
+|---|---|
+| `running.rs` | new: the Rc of objects passed to callbacks by reference |
+| `PrinterObject::type_name` / `call_method` | `printer.rs` |
+| `HeaterSlot` | `heaters.rs` |
+| `GcodeSlot`; settable RunoutHelper fields | `filament_switch_sensor.rs` |
+| output callback origins; handler-dict accessors | `gcode.rs` |
+| `PinChip::register_config_callback` / `python_object` | `pins.rs` |
+| `pub(crate)` fields | gcode_move, idle_timeout, Heater, ToolHead, PrinterExtruder |
+
+### Known gaps, all of which fail loudly
+
+- **Coverage.** Most of the 7,489 IDs still raise "kaliru: X is not mirrored yet". The work list is the surface tool plus a trace per corpus plugin.
+- **Override dispatch.** It is wired only where plugins are known to patch. Every other kaliru method still runs its own code.
+- **Str enums in Jinja.** A str enum in a status (AFC's `State`) reaches Jinja and JSON as its value. JSON matches Kalico, but a macro that renders the enum directly gets `Idle`, where Kalico shows `State.IDLE`.
+- **Valueless options.** A plugin-built `RawConfigParser` option with no value (`set(section, option)`) reads back as "" in kaliru.
+- **Output handlers.** An exception raised by a Python output handler is logged instead of propagated.
+- **Not supported yet:**
+  - waiting on a plugin's heater (`set_temperature(..., wait=True)`);
+  - a Python extra axis (`set_extruder` with a plugin object);
+  - assigning into the gcode handler dicts;
+  - AFC_stepper lanes (chelper ffi, PrinterStepper);
+  - SHAPER/TMC/MCU command objects.
+- **DeprecationWarning.** The CPython debug build prints `linecache` "`__loader__ != __spec__.loader`" for mirror modules. That points at module attributes worth checking.
+
 ## Steps
 
 1. Prototype the risky core and verify it before anything else (WSL, CPython 3.15 built locally):

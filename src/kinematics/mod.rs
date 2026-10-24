@@ -27,6 +27,10 @@ pub mod winch;
 
 /// what toolhead.py uses of a kinematics object
 pub trait Kinematics {
+    /// the Rust type's path (python plugins find the Kalico class by it)
+    fn type_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
     fn get_steppers(&self) -> Vec<Rc<McuStepper>>;
     /// calc_position(stepper_positions) with positions by stepper name
     fn calc_position(&self, stepper_positions: &IndexMap<String, f64>) -> Vec<f64>;

@@ -1,0 +1,9 @@
+# a python plugin (tests/plugins/kaliru_test_plugin.py in klippy/plugins)
+CONFIG basic.cfg
+DICTIONARY atmega2560.dict
+
+G4 P10
+TEST_PLUGIN
+TEST_PLUGIN V=3.25 N=7
+TEST_PLUGIN FAIL=1
+M115

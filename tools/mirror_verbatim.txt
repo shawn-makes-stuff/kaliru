@@ -1,0 +1,51 @@
+# Kalico methods the mirror runs as Kalico's own code (tools/gen_mirror.py):
+# derived methods built on mirrored primitives, so their semantics and
+# messages are Kalico's by construction. One qualified name per line.
+
+# configfile: all of ConfigWrapper, on its attributes (printer, fileconfig,
+# access_tracking, section: live views of kaliru's config, prelude.py)
+klippy.configfile.ConfigWrapper.__init__
+klippy.configfile.ConfigWrapper.get_printer
+klippy.configfile.ConfigWrapper.get_name
+klippy.configfile.ConfigWrapper._get_wrapper
+klippy.configfile.ConfigWrapper.get
+klippy.configfile.ConfigWrapper.getscript
+klippy.configfile.ConfigWrapper.getint
+klippy.configfile.ConfigWrapper.getfloat
+klippy.configfile.ConfigWrapper.getboolean
+klippy.configfile.ConfigWrapper.getsection
+klippy.configfile.ConfigWrapper.has_section
+klippy.configfile.ConfigWrapper.get_prefix_sections
+klippy.configfile.ConfigWrapper.get_prefix_options
+klippy.configfile.ConfigWrapper.deprecate
+klippy.configfile.ConfigWrapper.getchoice
+
+# gcode: GCodeCommand on its attributes (_command, _commandline, _params,
+# _need_ack, respond_info, respond_raw: kaliru's command, or plain python for
+# one a plugin builds with create_gcode_command)
+klippy.gcode.GCodeCommand.__init__
+klippy.gcode.GCodeCommand.get_command
+klippy.gcode.GCodeCommand.get_commandline
+klippy.gcode.GCodeCommand.get_command_parameters
+klippy.gcode.GCodeCommand.get_raw_command_parameters
+klippy.gcode.GCodeCommand.ack
+klippy.gcode.GCodeCommand.get
+klippy.gcode.GCodeCommand.get_int
+klippy.gcode.GCodeCommand.get_float
+klippy.gcode.GCodeDispatch.create_gcode_command
+klippy.configfile.ConfigWrapper.getlists
+klippy.configfile.ConfigWrapper.getlist
+klippy.configfile.ConfigWrapper.getintlist
+klippy.configfile.ConfigWrapper.getfloatlist
+
+# mathutil: pure python helpers (verbatim GCodeCommand.get_float uses safe_float)
+klippy.mathutil.safe_float
+klippy.mathutil.coordinate_descent
+klippy.mathutil.background_coordinate_descent
+klippy.mathutil.trilateration
+klippy.mathutil.matrix_cross
+klippy.mathutil.matrix_dot
+klippy.mathutil.matrix_magsq
+klippy.mathutil.matrix_add
+klippy.mathutil.matrix_sub
+klippy.mathutil.matrix_mul
