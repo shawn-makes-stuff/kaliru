@@ -257,6 +257,15 @@ impl Template {
         Ok(Function::Jinja(Rc::new(TemplateWrapperJinja::new(printer, env, name, script)?)))
     }
 
+    /// self.function: the wrapper object and its Rust type path
+    pub(crate) fn function(&self) -> (Rc<dyn std::any::Any>, &'static str) {
+        match &*self.function.borrow() {
+            Function::Jinja(f) => (f.clone(), std::any::type_name::<TemplateWrapperJinja>()),
+            #[cfg(feature = "python")]
+            Function::Python(f) => (f.clone(), std::any::type_name::<crate::extras::gcode_python::TemplateWrapperPython>()),
+        }
+    }
+
     pub fn reload(&self, env: &Environment, script_type: &str, script: &str) -> KResult<()> {
         let f = Self::make(&self.printer, env, &self.name, script_type, script)?;
         *self.function.borrow_mut() = f;

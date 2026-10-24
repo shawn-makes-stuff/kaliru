@@ -1,10 +1,12 @@
 // klippy/extras: pause_resume.PauseResume, gcode_macro.GCodeMacro
-// (variables), stepper_enable.PrinterStepperEnable / EnableTracking
+// (variables) / PrinterGCodeMacro / Template / TemplateWrapperJinja,
+// stepper_enable.PrinterStepperEnable / EnableTracking
 use super::*;
-use crate::extras::gcode_macro::GCodeMacro;
+use crate::extras::gcode_macro::{GCodeMacro, PrinterGCodeMacro, Template, TemplateWrapperJinja};
 use crate::extras::pause_resume::PauseResume;
 use crate::extras::stepper_enable::{EnableTracking, PrinterStepperEnable};
 use crate::jinja::value::Value;
+use indexmap::IndexMap;
 use crate::method;
 use crate::plugins::convert::ToPy;
 use crate::plugins::native::DictField;
@@ -23,6 +25,25 @@ pub fn register(r: &mut Registry) {
         a.this::<PauseResume>()?.cmd_resume(&g)?;
         Ok(py_none())
     });
+
+    // templates: Template delegates to its function (TemplateWrapperJinja /
+    // TemplateWrapperPython) through __getattr__, as in Kalico
+    r.method("klippy.extras.gcode_macro.PrinterGCodeMacro.load_template", |a| {
+        let config = super::configfile::config_from_py(a.arg(0))?;
+        let default = a.opt_string(2)?;
+        a.this::<PrinterGCodeMacro>()?.load_template(&config, &a.string(1)?, default.as_deref())?.to_py()
+    });
+    r.attr("klippy.extras.gcode_macro.Template.function", |o| template_function(o), None);
+    r.method("klippy.extras.gcode_macro.Template.__getattr__", |a| template_function(a.slf.as_ref().unwrap())?.getattr(&a.string(0)?));
+    method!(r, "klippy.extras.gcode_macro.TemplateWrapperJinja", TemplateWrapperJinja, render(t, context: Option<PyRef>) =>
+        t.render(template_context(context)?));
+    method!(r, "klippy.extras.gcode_macro.TemplateWrapperJinja", TemplateWrapperJinja, run_gcode_from_command(t, context: Option<PyRef>) =>
+        t.run_gcode_from_command(template_context(context)?));
+    #[cfg(feature = "python")]
+    objects::register_class::<crate::extras::gcode_python::TemplateWrapperPython>("klippy.extras.gcode_macro", "TemplateWrapperPython");
+    #[cfg(feature = "python")]
+    method!(r, "klippy.extras.gcode_macro.TemplateWrapperPython", crate::extras::gcode_python::TemplateWrapperPython,
+        run_gcode_from_command(t, context: Option<PyRef>) => t.run_gcode_from_command(template_context(context)?));
 
     // GCodeMacro.variables: {name: value}, values kaliru's jinja values
     r.dict(
@@ -66,4 +87,18 @@ pub fn register(r: &mut Registry) {
     method!(r, "klippy.extras.stepper_enable.EnableTracking", EnableTracking, motor_disable(e, print_time: f64) => e.motor_disable(print_time));
     method!(r, "klippy.extras.stepper_enable.EnableTracking", EnableTracking, is_motor_enabled(e) => e.is_motor_enabled());
     method!(r, "klippy.extras.stepper_enable.EnableTracking", EnableTracking, has_dedicated_enable(e) => e.has_dedicated_enable());
+}
+
+fn template_function(o: &PyRef) -> KResult<PyRef> {
+    let (f, type_name) = objects::unwrap_as::<Template>(o)?.function();
+    objects::wrap_any(f, type_name)
+}
+
+/// a render context python passes (a dict), as kaliru's jinja values
+fn template_context(context: Option<PyRef>) -> KResult<Option<IndexMap<String, Value>>> {
+    let Some(c) = context.filter(|c| !c.is_none()) else { return Ok(None) };
+    match to_pyval(&c)? {
+        crate::pyval::PyVal::Dict(d) => Ok(Some(d.iter().map(|(k, v)| (k.clone(), Value::from_pyval(v))).collect())),
+        _ => Err(KError::Py("TypeError".into(), "kaliru: a template context must be a dict".into())),
+    }
 }

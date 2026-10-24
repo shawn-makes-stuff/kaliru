@@ -79,7 +79,7 @@ impl Bus {
 pub struct LIS2DW {
     printer: Rc<Printer>,
     cmd_helper: RefCell<Option<Rc<AccelCommandHelper>>>,
-    lis_type: &'static str,
+    pub(crate) lis_type: &'static str,
     axes_map: AxisMap,
     data_rate: i64,
     bus: Bus,
@@ -88,7 +88,7 @@ pub struct LIS2DW {
     query_lis2dw_cmd: RefCell<Option<CommandWrapper>>,
     ffreader: FixedFreqReader,
     last_error_count: Cell<i64>,
-    batch_bulk: RefCell<Option<Rc<BatchBulkHelper>>>,
+    pub(crate) batch_bulk: RefCell<Option<Rc<BatchBulkHelper>>>,
     pub name: String,
 }
 

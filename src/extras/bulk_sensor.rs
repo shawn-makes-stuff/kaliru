@@ -32,7 +32,7 @@ pub struct BatchBulkHelper {
     batch_cb: BatchCallback,
     start_cb: Option<StartStopCallback>,
     stop_cb: Option<StartStopCallback>,
-    is_started: Cell<bool>,
+    pub(crate) is_started: Cell<bool>,
     batch_interval: f64,
     batch_timer: RefCell<Option<Timer>>,
     client_cbs: RefCell<Vec<ClientCallback>>,

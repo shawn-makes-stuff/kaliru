@@ -396,7 +396,7 @@ pub struct ADXL345 {
     query_adxl345_cmd: RefCell<Option<CommandWrapper>>,
     ffreader: FixedFreqReader,
     last_error_count: Cell<i64>,
-    batch_bulk: RefCell<Option<Rc<BatchBulkHelper>>>,
+    pub(crate) batch_bulk: RefCell<Option<Rc<BatchBulkHelper>>>,
     pub name: String,
 }
 

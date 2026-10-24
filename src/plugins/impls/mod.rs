@@ -2,6 +2,7 @@
 // kaliru, one file per klippy module. Registered by qualified name
 // (native::Registry); argument order is Kalico's signature with its
 // defaults filled in by the generated python.
+mod accel;
 mod buttons;
 mod configfile;
 mod extras_misc;
@@ -29,6 +30,7 @@ use std::rc::{Rc, Weak};
 
 pub fn register(r: &mut Registry) {
     printer::register(r);
+    accel::register(r);
     buttons::register(r);
     extras_misc::register(r);
     extras_state::register(r);
