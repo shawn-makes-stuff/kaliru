@@ -64,9 +64,9 @@ pub fn start() {
             *hist.entry(key).or_default() += 1;
         }
         let mut out = String::new();
-        let exe = std::env::current_exe().unwrap_or_default();
+        // executable mappings (the binary, libc, libpython, ...)
         for l in std::fs::read_to_string("/proc/self/maps").unwrap_or_default().lines() {
-            if l.ends_with(&*exe.to_string_lossy()) {
+            if l.split_whitespace().nth(1).is_some_and(|p| p.contains('x')) && l.contains('/') {
                 out += &format!("map {}\n", l);
             }
         }
