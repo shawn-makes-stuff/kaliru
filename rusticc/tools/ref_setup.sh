@@ -18,3 +18,14 @@ echo "Release - test" > klippy/.version
 ~/rk/venv315/bin/python "$HERE/../../tools/build_ref_chelper.py"
 ~/rk/venv315/bin/python -c "import klippy.chelper as c; c.get_ffi(); print('c_helper ok')"
 ~/rk/venv315/bin/python -m compileall -q --invalidation-mode checked-hash -d /usr/share/klipper/klippy klippy > /dev/null 2>&1 || true
+# the CC1 bed MCU's data dictionary (COSMOS config.bed: hx711s), for the
+# rusticc/cases that use it
+P="/mnt/d/Carbon Centauri/cosmos/meta-opencentauri/recipes-apps/klipper/files"
+FW=$(mktemp -d)
+cp -r "$REF/." "$FW"
+cp "$P/centauri-carbon-1/config.bed" "$FW/.config"
+make -C "$FW" olddefconfig > /dev/null
+make -C "$FW" -j8 > /dev/null
+cp "$FW/out/klipper.dict" /ci_build/dict/cc1_bed.dict
+rm -rf "$FW"
+echo "reference ready"

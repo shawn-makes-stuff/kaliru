@@ -8,6 +8,7 @@ pub mod ads1220;
 pub mod ads131m0x;
 pub mod cs1237;
 pub mod hx71x;
+pub mod hx711s;
 #[allow(clippy::module_inception)]
 pub mod load_cell;
 pub mod load_cell_probe;
@@ -47,7 +48,7 @@ pub trait BulkAdcSensor {
 pub type SensorFactory = fn(&ConfigWrapper) -> KResult<Rc<dyn BulkAdcSensor>>;
 
 /// the sensors that implement BulkAdcSensor, in python's dict union order
-pub fn sensor_types() -> [(&'static str, SensorFactory); 6] {
+pub fn sensor_types() -> [(&'static str, SensorFactory); 8] {
     [
         ("hx711", hx71x::new_hx711),
         ("hx717", hx71x::new_hx717),
@@ -55,6 +56,9 @@ pub fn sensor_types() -> [(&'static str, SensorFactory); 6] {
         ("ads131m02", ads131m0x::new_ads131m02),
         ("ads131m04", ads131m0x::new_ads131m04),
         ("cs1237", cs1237::new_cs1237),
+        // COSMOS 0007-Add-HX711s-load-cell-probe-driver
+        ("hx711s", hx711s::new_hx711s),
+        ("hx717s", hx711s::new_hx717s),
     ]
 }
 
@@ -139,10 +143,14 @@ pub(crate) fn adc_batch(data: Vec<PyVal>, errors: i64, overflows: i64) -> PyVal 
 
 /// ppins.lookup_pin(pin) of a sensor pin: (its mcu, pin name)
 pub(crate) fn lookup_sensor_pin(config: &ConfigWrapper, option: &str) -> KResult<(Rc<Mcu>, String)> {
+    lookup_pin(config, &config.get(option, crate::configfile::Dflt::Required)?)
+}
+
+/// ppins.lookup_pin(pin): (its mcu, pin name)
+pub(crate) fn lookup_pin(config: &ConfigWrapper, pin: &str) -> KResult<(Rc<Mcu>, String)> {
     let printer = config.get_printer();
-    let pin = config.get(option, crate::configfile::Dflt::Required)?;
     let ppins = printer.lookup::<PinsObject>("pins")?;
-    let pp = ppins.0.borrow_mut().lookup_pin(&pin, false, false, None).map_err(|e| KError::Pins(e.0))?;
+    let pp = ppins.0.borrow_mut().lookup_pin(pin, false, false, None).map_err(|e| KError::Pins(e.0))?;
     let mcu = crate::extras::bus::pin_mcu(config, &pp)?;
     let name = pp.borrow().pin.clone();
     Ok((mcu, name))
