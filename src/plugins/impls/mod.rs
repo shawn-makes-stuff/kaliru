@@ -11,6 +11,7 @@ mod extruder;
 mod filament_switch_sensor;
 mod gcode;
 mod heaters;
+mod mcu;
 mod pins;
 mod printer;
 mod reactor;
@@ -39,6 +40,7 @@ pub fn register(r: &mut Registry) {
     filament_switch_sensor::register(r);
     gcode::register(r);
     heaters::register(r);
+    mcu::register(r);
     pins::register(r);
     reactor::register(r);
     toolhead::register(r);

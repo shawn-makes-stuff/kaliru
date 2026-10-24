@@ -251,13 +251,15 @@ impl RunoutHelper {
     }
 
     pub fn note_filament_present(&self, eventtime: f64, is_filament_present: Option<bool>, force: bool, immediate: bool) -> KResult<()> {
-        // a python plugin may have replaced it (AFC's debounced handler)
+        // a python plugin may have replaced it (AFC's debounced handler); it
+        // gets the arguments kalico's callers pass: positional, trailing
+        // defaults (force=False, immediate=False) left off
         #[cfg(feature = "plugins")]
-        if let Some(r) = crate::plugins::dispatch(
-            self,
-            "klippy.extras.filament_switch_sensor.RunoutHelper.note_filament_present",
-            &[&eventtime, &is_filament_present, &force, &immediate],
-        ) {
+        if let Some(r) = {
+            let args: [&dyn std::any::Any; 4] = [&eventtime, &is_filament_present, &force, &immediate];
+            let n = if immediate { 4 } else if force { 3 } else { 2 };
+            crate::plugins::dispatch(self, "klippy.extras.filament_switch_sensor.RunoutHelper.note_filament_present", &args[..n])
+        } {
             return r.map(|_| ());
         }
         let is_filament_present = is_filament_present.unwrap_or(self.filament_present.get());
