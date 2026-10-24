@@ -435,7 +435,9 @@ impl TmcMcu for McuTmcUart {
         }
         self.with_mutex(|| {
             for _retry in 0..5 {
-                let ifcnt = match *self.ifcnt.borrow() {
+                // (the cached value, not the borrow: the None arm stores into the cell)
+                let cached = *self.ifcnt.borrow();
+                let ifcnt = match cached {
                     Some(i) => i,
                     None => {
                         let i = self.do_get_register("IFCNT")?.data;
