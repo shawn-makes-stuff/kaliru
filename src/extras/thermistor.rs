@@ -1,4 +1,7 @@
 // Temperature measurements with thermistors (port of klippy/extras/thermistor.py)
+// Rusticc: with COSMOS's 0001-implement-pulldown-resistor-in-thermistor-calc
+// (pulldown_resistor: a resistor in parallel with the thermistor, the CC1's
+// CANVAS toolhead board has 100k)
 //
 // Copyright (C) 2016-2019  Kevin O'Connor <kevin@koconnor.net>
 //
@@ -27,14 +30,15 @@ fn py_log(x: f64) -> KResult<f64> {
 pub struct Thermistor {
     pullup: f64,
     inline_resistor: f64,
+    pulldown_resistor: f64,
     c1: Cell<f64>,
     c2: Cell<f64>,
     c3: Cell<f64>,
 }
 
 impl Thermistor {
-    pub fn new(pullup: f64, inline_resistor: f64) -> Self {
-        Thermistor { pullup, inline_resistor, c1: Cell::new(0.0), c2: Cell::new(0.0), c3: Cell::new(0.0) }
+    pub fn new(pullup: f64, inline_resistor: f64, pulldown_resistor: f64) -> Self {
+        Thermistor { pullup, inline_resistor, pulldown_resistor, c1: Cell::new(0.0), c2: Cell::new(0.0), c3: Cell::new(0.0) }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -73,6 +77,22 @@ impl Thermistor {
         self.c1.set(inv_t1 - self.c2.get() * ln_r1);
         Ok(())
     }
+
+    fn remove_pulldown(&self, r: f64) -> f64 {
+        if self.pulldown_resistor == 0.0 {
+            return r;
+        }
+        // The ADC sees the thermistor branch in parallel with pulldown_resistor.
+        let r = py_min(r, self.pulldown_resistor * 0.999999);
+        r * self.pulldown_resistor / (self.pulldown_resistor - r)
+    }
+
+    fn apply_pulldown(&self, r: f64) -> f64 {
+        if self.pulldown_resistor == 0.0 {
+            return r;
+        }
+        r * self.pulldown_resistor / (r + self.pulldown_resistor)
+    }
 }
 
 impl AdcConvert for Thermistor {
@@ -80,7 +100,9 @@ impl AdcConvert for Thermistor {
         // Calculate temperature from adc
         let adc = py_max(0.00001, py_min(0.99999, adc));
         let r = self.pullup * adc / (1.0 - adc);
-        let ln_r = py_log(r - self.inline_resistor)?;
+        let r = self.remove_pulldown(r) - self.inline_resistor;
+        let r = py_max(0.0000001, r);
+        let ln_r = py_log(r)?;
         let inv_t = self.c1.get() + self.c2.get() * ln_r + self.c3.get() * ln_r.powf(3.0);
         Ok(1.0 / inv_t + KELVIN_TO_CELSIUS)
     }
@@ -105,25 +127,29 @@ impl AdcConvert for Thermistor {
             (inv_t - self.c1.get()) / self.c2.get()
         };
         let r = ln_r.exp() + self.inline_resistor;
+        let r = self.apply_pulldown(r);
         Ok(r / (self.pullup + r))
     }
 }
 
-/// thermistor parameters: (t1, r1, beta) or the three points
+/// thermistor parameters: (t1, r1, beta) or the three points, and the
+/// pulldown_resistor
 #[derive(Clone)]
 pub enum ThermistorParams {
-    Beta { t1: f64, r1: f64, beta: f64 },
-    Points { t1: f64, r1: f64, t2: f64, r2: f64, t3: f64, r3: f64 },
+    Beta { t1: f64, r1: f64, beta: f64, pulldown_resistor: f64 },
+    Points { t1: f64, r1: f64, t2: f64, r2: f64, t3: f64, r3: f64, pulldown_resistor: f64 },
 }
 
 // Create an ADC converter with a thermistor
 pub fn printer_thermistor(config: &ConfigWrapper, params: &ThermistorParams) -> KResult<Rc<dyn TempSensor>> {
     let pullup = config.getfloat("pullup_resistor", 4700.0, Lim::new().above(0.0))?;
     let inline_resistor = config.getfloat("inline_resistor", 0.0, Lim::new().min(0.0))?;
-    let thermistor = Thermistor::new(pullup, inline_resistor);
+    let (ThermistorParams::Beta { pulldown_resistor, .. } | ThermistorParams::Points { pulldown_resistor, .. }) = *params;
+    let pulldown_resistor = config.getfloat("pulldown_resistor", pulldown_resistor, Lim::new().min(0.0))?;
+    let thermistor = Thermistor::new(pullup, inline_resistor, pulldown_resistor);
     match *params {
-        ThermistorParams::Beta { t1, r1, beta } => thermistor.setup_coefficients_beta(t1, r1, beta)?,
-        ThermistorParams::Points { t1, r1, t2, r2, t3, r3 } => {
+        ThermistorParams::Beta { t1, r1, beta, .. } => thermistor.setup_coefficients_beta(t1, r1, beta)?,
+        ThermistorParams::Points { t1, r1, t2, r2, t3, r3, .. } => {
             thermistor.setup_coefficients(t1, r1, t2, r2, t3, r3, config.get_name())?
         }
     }
@@ -134,8 +160,10 @@ pub fn printer_thermistor(config: &ConfigWrapper, params: &ThermistorParams) -> 
 pub fn custom_thermistor(config: &ConfigWrapper) -> KResult<ThermistorParams> {
     let t1 = config.getfloat("temperature1", Dflt::Required, Lim::new().min(KELVIN_TO_CELSIUS))?;
     let r1 = config.getfloat("resistance1", Dflt::Required, Lim::new().min(0.0))?;
-    if let Some(beta) = config.getfloat_opt("beta", Lim::new().above(0.0))? {
-        return Ok(ThermistorParams::Beta { t1, r1, beta });
+    let beta = config.getfloat_opt("beta", Lim::new().above(0.0))?;
+    let pulldown_resistor = config.getfloat("pulldown_resistor", 0.0, Lim::new().min(0.0))?;
+    if let Some(beta) = beta {
+        return Ok(ThermistorParams::Beta { t1, r1, beta, pulldown_resistor });
     }
     let t2 = config.getfloat("temperature2", Dflt::Required, Lim::new().min(KELVIN_TO_CELSIUS))?;
     let r2 = config.getfloat("resistance2", Dflt::Required, Lim::new().min(0.0))?;
@@ -144,7 +172,7 @@ pub fn custom_thermistor(config: &ConfigWrapper) -> KResult<ThermistorParams> {
     let mut pts = [(t1, r1), (t2, r2), (t3, r3)];
     pts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let [(t1, r1), (t2, r2), (t3, r3)] = pts;
-    Ok(ThermistorParams::Points { t1, r1, t2, r2, t3, r3 })
+    Ok(ThermistorParams::Points { t1, r1, t2, r2, t3, r3, pulldown_resistor })
 }
 
 pub fn load_config_prefix(config: &ConfigWrapper) -> KResult<PObj> {
@@ -153,4 +181,32 @@ pub fn load_config_prefix(config: &ConfigWrapper) -> KResult<PObj> {
     let pheaters = load_heaters(config)?;
     pheaters.add_sensor_factory(&name, Rc::new(move |config: &ConfigWrapper| printer_thermistor(config, &params)));
     Ok(none_object())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// calc_temp / calc_adc with pulldown_resistor, as COSMOS's python gives them
+    #[test]
+    fn pulldown() {
+        let t = Thermistor::new(4700.0, 0.0, 100000.0);
+        t.setup_coefficients_beta(25.0, 100000.0, 3950.0).unwrap();
+        let temps: Vec<f64> = [0.0, 0.01, 0.1, 0.5, 0.9, 0.95, 0.99, 0.999, 1.0].iter().map(|a| t.calc_temp(*a).unwrap()).collect();
+        assert_eq!(temps, [-3260.690620222191, 432.6971709805599, 220.6760141405802, 112.63371896172578, 32.15469230477049, -16.157906540315253, -127.19898313194969, -127.19898313194969, -127.19898313194969]);
+        let adcs: Vec<f64> = [-300.0, 0.0, 25.0, 100.0, 200.0, 300.0].iter().map(|x| t.calc_adc(*x).unwrap()).collect();
+        assert_eq!(adcs, [1.0, 0.9425252593532268, 0.9140767824497258, 0.5811196468025761, 0.13588794252253147, 0.03554538964588165]);
+        let t = Thermistor::new(4700.0, 50.0, 47000.0);
+        t.setup_coefficients(25.0, 100000.0, 150.0, 1641.9, 250.0, 226.15, "").unwrap();
+        let temps: Vec<f64> = [0.0, 0.01, 0.1, 0.5, 0.9, 0.95, 0.99, 0.999, 1.0].iter().map(|a| t.calc_temp(*a).unwrap()).collect();
+        assert_eq!(temps, [-591.0510318859599, -591.0510318859599, 207.50043532466458, 106.85399436502223, -4.657397858758088, -137.5353184396466, -137.5353184396466, -137.5353184396466, -137.5353184396466]);
+        let adcs: Vec<f64> = [-300.0, 0.0, 25.0, 100.0, 200.0, 300.0].iter().map(|x| t.calc_adc(*x).unwrap()).collect();
+        assert_eq!(adcs, [1.0, 0.8975267344533139, 0.8718574354058647, 0.5449169839822805, 0.11239447773464356, 0.032275935954009405]);
+        let t = Thermistor::new(4700.0, 0.0, 0.0);
+        t.setup_coefficients_beta(25.0, 100000.0, 3950.0).unwrap();
+        let temps: Vec<f64> = [0.0, 0.01, 0.1, 0.5, 0.9, 0.95, 0.99, 0.999, 1.0].iter().map(|a| t.calc_temp(*a).unwrap()).collect();
+        assert_eq!(temps, [-3260.689558202203, 432.75707098972225, 220.9994789393936, 114.45613240847592, 45.707426361634475, 27.568766143873177, -6.003183074855997, -42.122234336944786, -91.15315302601343]);
+        let adcs: Vec<f64> = [-300.0, 0.0, 25.0, 100.0, 200.0, 300.0].iter().map(|x| t.calc_adc(*x).unwrap()).collect();
+        assert_eq!(adcs, [1.0, 0.9862132098380977, 0.9551098376313276, 0.5974372247265058, 0.13676140111700302, 0.03560487233171683]);
+    }
 }

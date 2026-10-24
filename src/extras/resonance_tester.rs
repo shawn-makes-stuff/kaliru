@@ -662,6 +662,13 @@ impl ResonanceTester {
             Some(m) => Some(gcmd.get_float("MAX_SMOOTHING", Some(m), lim)?),
             None => gcmd.get_float_opt("MAX_SMOOTHING", lim)?,
         };
+        // COSMOS 0001-force-specific-input-shaper
+        let force_shaper = gcmd.get_opt("FORCE_SHAPER").map(|s| s.to_lowercase());
+        if let Some(f) = &force_shaper {
+            if !crate::extras::shaper_defs::INPUT_SHAPERS.iter().any(|s| s.name == f) {
+                return Err(gcmd.error(format!("Unsupported shaper type: {}", f)));
+            }
+        }
         let name_suffix = gcmd.get_or("NAME", &strftime_local("%Y%m%d_%H%M%S"));
         if !is_valid_name(&name_suffix) {
             return Err(gcmd.error("Invalid NAME parameter"));
@@ -689,7 +696,7 @@ impl ResonanceTester {
             let scv = toolhead_status(&toolhead, systime, "square_corner_velocity");
             let max_freq = self.get_max_calibration_freq();
             let logger = |m: &str| gcmd.respond_info(m, true);
-            let (best_shaper, all_shapers) = helper.find_best_shaper(data, scv, max_smoothing, Some(max_freq), Some(&logger))?;
+            let (best_shaper, all_shapers) = helper.find_best_shaper(data, force_shaper.as_ref().map(std::slice::from_ref), scv, max_smoothing, Some(max_freq), Some(&logger))?;
             gcmd.respond_info(
                 &format!(
                     "Recommended shaper_type_{} = {}, shaper_freq_{} = {:.1} Hz",

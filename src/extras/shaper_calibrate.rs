@@ -415,12 +415,13 @@ impl ShaperCalibrate {
         calibration_data.ok_or_else(|| KError::command(format!("Internal error processing accelerometer data {}", data_repr)))
     }
 
-    /// find_best_shaper(calibration_data, shapers=None, damping_ratio=None,
+    /// find_best_shaper(calibration_data, shapers, damping_ratio=None,
     /// scv, shaper_freqs=None, max_smoothing, test_damping_ratios=None,
     /// max_freq, logger)
     pub fn find_best_shaper(
         &self,
         calibration_data: &CalibrationData,
+        shapers: Option<&[String]>,
         scv: f64,
         max_smoothing: Option<f64>,
         max_freq: Option<f64>,
@@ -429,7 +430,12 @@ impl ShaperCalibrate {
         let mut best_shaper: Option<CalibrationResult> = None;
         let mut all_shapers = vec![];
         for (idx, shaper_cfg) in INPUT_SHAPERS.iter().enumerate() {
-            if !AUTOTUNE_SHAPERS.contains(&shaper_cfg.name) {
+            // shapers or AUTOTUNE_SHAPERS (an empty list is falsy)
+            let wanted = match shapers.filter(|s| !s.is_empty()) {
+                Some(s) => s.iter().any(|n| n == shaper_cfg.name),
+                None => AUTOTUNE_SHAPERS.contains(&shaper_cfg.name),
+            };
+            if !wanted {
                 continue;
             }
             let data = calibration_data.clone();

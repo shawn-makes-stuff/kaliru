@@ -867,8 +867,19 @@ impl PrinterConfig {
                     continue;
                 }
             }
-            match header.as_deref().and_then(|h| h.strip_prefix("include ")) {
+            let header = header.as_deref();
+            match header.and_then(|h| h.strip_prefix("include ")) {
                 Some(spec) => pending_include = Some(py_strip(spec).to_string()),
+                // COSMOS 0004-allow-config-exclude: [!section] removes a
+                // section defined before it
+                None if header.is_some_and(|h| h.starts_with('!')) => {
+                    self.parse_config_buffer(&mut buffer, filename, fileconfig)?;
+                    let section_name = py_strip(&header.unwrap()[1..]);
+                    if !fileconfig.borrow().has_section(section_name) {
+                        return Err(error(format!("Section '{}' does not exist for exclusion", section_name)));
+                    }
+                    fileconfig.borrow_mut().remove_section(section_name);
+                }
                 None => {
                     let line = match line.find(INCLUDE_TAG) {
                         Some(p) => format!("{}{}", &line[..p], fix_include_path(filename, &line[p + INCLUDE_TAG.len()..])?),
@@ -912,9 +923,9 @@ impl PrinterConfig {
     pub fn read_main_config(&mut self) -> Result<ConfigWrapper> {
         let filename = self.config_file.clone();
         let data = self.read_config_file(&filename)?;
+        // (COSMOS 0001-remove-save-config-subfile-check: autosave keeps the
+        // options the regular config also has)
         let (regular_data, autosave_data) = self.find_autosave_data(&data);
-        let regular_config = self.build_config_wrapper(&regular_data, &filename)?;
-        let autosave_data = self.strip_duplicates(&autosave_data, &regular_config);
         self.autosave = Some(self.build_config_wrapper(&autosave_data, &filename)?);
         self.build_config_wrapper(&format!("{}{}", regular_data, autosave_data), &filename)
     }
@@ -1073,29 +1084,6 @@ impl PrinterConfig {
         }
     }
 
-    /// Err(msg) where python raises gcode.error(msg)
-    fn disallow_include_conflicts(&self, regular_data: &str, cfgname: &str) -> std::result::Result<(), String> {
-        let config = self.build_config_wrapper(regular_data, cfgname).map_err(|e| e.message)?;
-        let autosave = self.autosave.as_ref().unwrap().fileconfig.borrow();
-        let fc = config.fileconfig.borrow();
-        for section in autosave.sections() {
-            for option in autosave.options(&section).map_err(|e| e.message)? {
-                if fc.has_option(&section, &option) {
-                    // They conflict only if they are not the same value
-                    let included_value = fc.get(&section, &option).map_err(|e| e.message)?;
-                    let autosave_value = autosave.get(&section, &option).map_err(|e| e.message)?;
-                    if included_value != autosave_value {
-                        return Err(format!(
-                            "SAVE_CONFIG section '{}' option '{}' value '{}' conflicts with included value '{}' ",
-                            section, option, autosave_value, included_value
-                        ));
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
     fn write_backup(&self, cfgpath: &str, cfgdata: &str) -> std::result::Result<(), String> {
         let printercfg = &self.config_file;
         let configdir = pyglob::dirname(printercfg);
@@ -1212,8 +1200,7 @@ impl PrinterConfig {
         if autosave_includes {
             self.save_includes(&cfgname, &data, &mut HashSet::new())?;
         }
-        // NOW we're safe to check for conflicts
-        self.disallow_include_conflicts(&regular_data, &cfgname)?;
+        // (COSMOS: no _disallow_include_conflicts)
         let data = format!("{}{}", py_rstrip(&regular_data), autosave_data);
         self.write_backup(&cfgname, &data)?;
         Ok(true)

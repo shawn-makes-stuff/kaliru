@@ -463,9 +463,10 @@ impl LoadCellGuidedCalibrationHelper {
                 "ERROR: Tare and Calibration readings are the same!\nCheck wiring and validate sensor with READ_LOAD_CELL command.",
             ));
         }
-        if (cal_percent - self.tare_percent.get()).abs() < 1.0 {
+        // COSMOS 0002-reduce-calibration-difference-tolerance: 0.1 %
+        if (cal_percent - self.tare_percent.get()).abs() < 0.1 {
             return Err(KError::command(
-                "ERROR: Tare and Calibration readings are less than 1% different!\nUse more force when calibrating or a higher sensor gain.",
+                "ERROR: Tare and Calibration readings are less than 0.1% different!\nUse more force when calibrating or a higher sensor gain.",
             ));
         }
         // only set _counts_per_gram after all errors are raised

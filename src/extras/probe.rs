@@ -942,7 +942,8 @@ impl PrinterProbe {
             let toolhead = self.toolhead()?;
             toolhead.get_last_move_time()?;
             let mut toolhead_pos = toolhead.get_position();
-            toolhead_pos[2] -= self.last_z_result.get();
+            // COSMOS 0001-probe-home-z-includes-z-offset
+            toolhead_pos[2] = toolhead_pos[2] - self.last_z_result.get() + self.z_offset;
             toolhead.set_position(&toolhead_pos, "z")?;
         }
         Ok(())

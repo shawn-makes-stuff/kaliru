@@ -1,6 +1,8 @@
 // Code to implement asynchronous logging from a background thread
 // (port of klippy/queuelogger.py, with the parts of python 3.13's
-// logging.handlers.TimedRotatingFileHandler it relies on; sources in ref/)
+// logging.handlers.TimedRotatingFileHandler it relies on; sources in ref/).
+// Rusticc: COSMOS's 0001-Reduce-log-rotate-threshold makes the listener a
+// RotatingFileHandler (5 MiB, 2 backups): SizeRotatingFile.
 //
 // Copyright (C) 2016-2019  Kevin O'Connor <kevin@koconnor.net>
 //
@@ -8,7 +10,7 @@
 use crate::logging;
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{Seek, SeekFrom, Write};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
@@ -192,17 +194,94 @@ impl RotatingFile {
     }
 }
 
+/// python 3.15 logging.handlers.RotatingFileHandler (mode 'a', no
+/// namer/rotator)
+pub struct SizeRotatingFile {
+    base_filename: String,
+    stream: Option<File>,
+    max_bytes: u64,
+    backup_count: usize,
+}
+
+impl SizeRotatingFile {
+    pub fn new(filename: &str, max_bytes: u64, backup_count: usize) -> std::io::Result<Self> {
+        let base_filename = crate::pyglob::abspath(filename);
+        let stream = Some(Self::open(&base_filename)?);
+        Ok(SizeRotatingFile { base_filename, stream, max_bytes, backup_count })
+    }
+
+    // open(filename, 'a'): positioned at the end, as tell() reports it
+    fn open(path: &str) -> std::io::Result<File> {
+        let mut f = OpenOptions::new().create(true).append(true).open(path)?;
+        f.seek(SeekFrom::End(0))?;
+        Ok(f)
+    }
+
+    /// shouldRollover(record) for the formatted message `msg`
+    fn should_rollover(&mut self, msg: &str) -> bool {
+        if self.stream.is_none() {
+            self.stream = Self::open(&self.base_filename).ok();
+        }
+        if self.max_bytes > 0 {
+            let Some(pos) = self.stream.as_mut().and_then(|f| f.stream_position().ok()) else { return false };
+            // Never rollover an empty file
+            if pos == 0 {
+                return false;
+            }
+            // (len() of the text: characters, not bytes)
+            if pos + msg.chars().count() as u64 + 1 >= self.max_bytes {
+                // Never rollover anything other than regular files
+                let p = std::path::Path::new(&self.base_filename);
+                return !(p.exists() && !p.is_file());
+            }
+        }
+        false
+    }
+
+    /// doRollover()
+    pub fn do_rollover(&mut self) {
+        let exists = |p: &str| std::path::Path::new(p).exists();
+        self.stream = None;
+        if self.backup_count > 0 {
+            for i in (1..self.backup_count).rev() {
+                let sfn = format!("{}.{}", self.base_filename, i);
+                let dfn = format!("{}.{}", self.base_filename, i + 1);
+                if exists(&sfn) {
+                    if exists(&dfn) {
+                        let _ = std::fs::remove_file(&dfn);
+                    }
+                    let _ = std::fs::rename(&sfn, &dfn);
+                }
+            }
+            let dfn = format!("{}.1", self.base_filename);
+            if exists(&dfn) {
+                let _ = std::fs::remove_file(&dfn);
+            }
+            if exists(&self.base_filename) {
+                let _ = std::fs::rename(&self.base_filename, &dfn);
+            }
+        }
+        self.stream = Self::open(&self.base_filename).ok();
+    }
+
+    fn write_line(&mut self, msg: &str) {
+        if let Some(f) = self.stream.as_mut() {
+            let _ = f.write_all(format!("{}
+", msg).as_bytes());
+            let _ = f.flush();
+        }
+    }
+}
+
 struct Inner {
-    file: RotatingFile,
+    file: SizeRotatingFile,
     rollover_info: BTreeMap<String, String>,
 }
 
 impl Inner {
     /// QueueListener.doRollover
     fn do_rollover(&mut self) {
-        if !self.file.do_rollover() {
-            return;
-        }
+        self.file.do_rollover();
         let mut lines: Vec<String> = self.rollover_info.values().cloned().collect();
         lines.push(format!("=============== Log rollover at {} ===============", crate::util::asctime_local(now() as f64)));
         self.emit(&lines.join("\n"));
@@ -210,7 +289,7 @@ impl Inner {
 
     /// BaseRotatingHandler.emit
     fn emit(&mut self, msg: &str) {
-        if self.file.should_rollover() {
+        if self.file.should_rollover(msg) {
             self.do_rollover();
         }
         self.file.write_line(msg);
@@ -225,9 +304,10 @@ pub struct QueueListener {
 }
 
 impl QueueListener {
-    pub fn new(filename: &str, rotate_log_at_restart: bool) -> std::io::Result<Self> {
-        let when = if rotate_log_at_restart { When::Seconds } else { When::Midnight };
-        let inner = Arc::new(Mutex::new(Inner { file: RotatingFile::new(filename, when)?, rollover_info: BTreeMap::new() }));
+    /// (rotate_log_at_restart: unused here, as in COSMOS's queuelogger)
+    pub fn new(filename: &str, _rotate_log_at_restart: bool) -> std::io::Result<Self> {
+        let file = SizeRotatingFile::new(filename, 5 * 1024 * 1024, 2)?;
+        let inner = Arc::new(Mutex::new(Inner { file, rollover_info: BTreeMap::new() }));
         let (tx, rx) = mpsc::channel::<Option<String>>();
         let i = inner.clone();
         let thread = std::thread::spawn(move || {
@@ -314,6 +394,30 @@ mod tests {
         assert_eq!(names.len(), 7, "{:?}", names);
         assert!(!names.contains(&"klippy.log.2026-01-01".to_string()));
         assert!(names.contains(&"klippy.log.notadate".to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn size_rollover() {
+        let dir = std::env::temp_dir().join(format!("kaliru_qls_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("klippy.log").to_string_lossy().into_owned();
+        std::fs::write(format!("{}.1", log), "one").unwrap();
+        std::fs::write(format!("{}.2", log), "two").unwrap();
+        let mut f = SizeRotatingFile::new(&log, 11, 2).unwrap();
+        // an empty file never rolls over
+        assert!(!f.should_rollover("0123456789abc"));
+        f.write_line("abcd");
+        // pos 5 + the message and its newline, in characters ("é" is one)
+        assert!(!f.should_rollover("123é"));
+        assert!(f.should_rollover("12345"));
+        f.do_rollover();
+        let read = |n: &str| std::fs::read_to_string(dir.join(n)).unwrap();
+        assert_eq!(read("klippy.log.1"), "abcd
+");
+        assert_eq!(read("klippy.log.2"), "one");
+        assert_eq!(read("klippy.log"), "");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
