@@ -616,7 +616,7 @@ impl PrinterObject for VirtualSD {
     }
     fn teardown(&self) {
         if let Some(t) = self.work_timer.borrow_mut().take() {
-            self.reactor.unregister_timer(&t);
+            self.reactor.forget_timer(&t);
         }
         *self.current_file.borrow_mut() = None;
     }

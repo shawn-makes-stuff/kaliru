@@ -405,7 +405,7 @@ impl PrinterObject for PrinterTemplateEvaluator {
     fn teardown(&self) {
         self.active_templates.borrow_mut().clear();
         if let Some(t) = self.render_timer.borrow_mut().take() {
-            self.printer.get_reactor().unregister_timer(&t);
+            self.printer.get_reactor().forget_timer(&t);
         }
     }
 }

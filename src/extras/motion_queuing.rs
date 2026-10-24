@@ -460,7 +460,7 @@ impl PrinterObject for PrinterMotionQueuing {
         self.flush_callbacks.borrow_mut().clear();
         self.steppersyncs.borrow_mut().clear();
         if let Some(t) = self.flush_timer.borrow_mut().take() {
-            self.reactor.unregister_timer(&t);
+            self.reactor.forget_timer(&t);
         }
     }
 }

@@ -124,7 +124,7 @@ impl PrinterObject for DelayedGcode {
     }
     fn teardown(&self) {
         if let Some(t) = self.timer_handler.borrow_mut().take() {
-            self.reactor.unregister_timer(&t);
+            self.reactor.forget_timer(&t);
         }
     }
 }

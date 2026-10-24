@@ -410,7 +410,7 @@ impl SerialReader {
             if self.reactor.monotonic() > start_time + 90.0 {
                 return Err(error(format!("{}Unable to connect", self.warn_prefix)));
             }
-            let dev = match Uart::open(serialport, baud, true, Some(rts)) {
+            let dev = match Uart::open(serialport, baud, Some(true), Some(rts)) {
                 Ok(d) => d,
                 Err(e) => {
                     logging::warning(&format!("{}Unable to open serial port: {}", self.warn_prefix, e));
@@ -427,7 +427,7 @@ impl SerialReader {
     }
 
     pub fn check_connect(&self, serialport: &str, baud: u32, rts: bool) -> bool {
-        Uart::open(serialport, baud, false, Some(rts)).is_ok()
+        Uart::open(serialport, baud, Some(false), Some(rts)).is_ok()
     }
 
     /// connect_file(debugoutput, dictionary, pace)
@@ -749,20 +749,66 @@ fn std_baud(baud: u32) -> Option<libc::speed_t> {
     })
 }
 
+// pyserial 3.4 serialposix errors: SerialException raised while handling
+// the OSError / termios.error underneath
+fn serial_exception(msg: String, context: KError) -> KError {
+    KError::Py("serial.serialutil.SerialException".into(), msg).with_context(context)
+}
+
+/// str() of an OSError without a filename: "[Errno N] message"
+fn errno_str(e: &std::io::Error) -> String {
+    let errno = e.raw_os_error().unwrap_or(0);
+    let msg = unsafe { std::ffi::CStr::from_ptr(libc::strerror(errno)) }.to_string_lossy().into_owned();
+    format!("[Errno {}] {}", errno, msg)
+}
+
+fn os_error(e: &std::io::Error) -> KError {
+    KError::Py(crate::pyfmt::py_oserror_class(e).into(), errno_str(e))
+}
+
+/// termios.error: str() is the (errno, message) tuple
+fn termios_error(e: &std::io::Error) -> KError {
+    let errno = e.raw_os_error().unwrap_or(0);
+    let msg = unsafe { std::ffi::CStr::from_ptr(libc::strerror(errno)) }.to_string_lossy().into_owned();
+    KError::Py("termios.error".into(), format!("({}, {})", errno, crate::pyfmt::py_str_repr(&msg)))
+}
+
+/// _set_special_baudrate: ValueError raised while handling the ioctl's OSError
+fn custom_baud_error(baud: u32) -> KError {
+    let e = std::io::Error::last_os_error();
+    KError::Py("ValueError".into(), format!("Failed to set custom baud rate ({}): {}", baud, errno_str(&e))).with_context(os_error(&e))
+}
+
 impl Uart {
     /// pyserial Serial(baudrate=baud, timeout=0, exclusive=...) + port +
     /// rts + open(); dtr is asserted on open like pyserial
-    pub fn open(port: &str, baud: u32, exclusive: bool, rts: Option<bool>) -> Result<Uart, String> {
-        let c = std::ffi::CString::new(port).map_err(|e| e.to_string())?;
+    pub fn open(port: &str, baud: u32, exclusive: Option<bool>, rts: Option<bool>) -> KResult<Uart> {
+        let c = std::ffi::CString::new(port).map_err(|e| KError::Py("ValueError".into(), e.to_string()))?;
         let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDWR | libc::O_NOCTTY | libc::O_NONBLOCK) };
         if fd < 0 {
             let e = std::io::Error::last_os_error();
-            return Err(format!("[Errno {}] could not open port {}: {}", e.raw_os_error().unwrap_or(0), port, crate::pyfmt::py_oserror(&e, port)));
+            let ctx = KError::Py(crate::pyfmt::py_oserror_class(&e).into(), crate::pyfmt::py_oserror(&e, port));
+            return Err(serial_exception(
+                format!("[Errno {}] could not open port {}: {}", e.raw_os_error().unwrap_or(0), port, crate::pyfmt::py_oserror(&e, port)),
+                ctx,
+            ));
         }
+        // (dropped, so closed, when the configuration fails)
         let uart = Uart { fd };
-        if exclusive && unsafe { libc::ioctl(fd, libc::TIOCEXCL) } != 0 {
-            let e = std::io::Error::last_os_error();
-            return Err(format!("Could not exclusively lock port {}: {}", port, e));
+        // _reconfigure_port: the exclusive lock comes before anything else
+        // (exclusive=None: no flock at all)
+        if let Some(exclusive) = exclusive {
+            let lock = if exclusive { libc::LOCK_EX | libc::LOCK_NB } else { libc::LOCK_UN };
+            if unsafe { libc::flock(fd, lock) } != 0 {
+                let e = std::io::Error::last_os_error();
+                if !exclusive {
+                    return Err(os_error(&e));
+                }
+                return Err(serial_exception(
+                    format!("[Errno {}] Could not exclusively lock port {}: {}", e.raw_os_error().unwrap_or(0), port, errno_str(&e)),
+                    os_error(&e),
+                ));
+            }
         }
         uart.configure(baud)?;
         uart.set_modem_line(libc::TIOCM_DTR, true);
@@ -772,11 +818,14 @@ impl Uart {
         Ok(uart)
     }
 
-    fn configure(&self, baud: u32) -> Result<(), String> {
+    fn configure(&self, baud: u32) -> KResult<()> {
         unsafe {
             let mut t: libc::termios = std::mem::zeroed();
             if libc::tcgetattr(self.fd, &mut t) != 0 {
-                return Err(format!("Could not configure port: {}", std::io::Error::last_os_error()));
+                // a port that has a /dev file but is no tty fails here
+                let e = std::io::Error::last_os_error();
+                let te = termios_error(&e);
+                return Err(serial_exception(format!("Could not configure port: {}", te.message()), te));
             }
             // pyserial: raw mode, 8N1, CLOCAL | CREAD, no flow control, VMIN 0 VTIME 0
             t.c_cflag |= libc::CLOCAL | libc::CREAD;
@@ -792,20 +841,20 @@ impl Uart {
             libc::cfsetispeed(&mut t, speed);
             libc::cfsetospeed(&mut t, speed);
             if libc::tcsetattr(self.fd, libc::TCSANOW, &t) != 0 {
-                return Err(format!("Could not configure port: {}", std::io::Error::last_os_error()));
+                return Err(termios_error(&std::io::Error::last_os_error()));
             }
             if std.is_none() {
                 // custom baud rate via termios2 / BOTHER
                 let mut t2: Termios2 = std::mem::zeroed();
                 if libc::ioctl(self.fd, TCGETS2, &mut t2) != 0 {
-                    return Err(format!("Failed to set custom baud rate ({}): {}", baud, std::io::Error::last_os_error()));
+                    return Err(custom_baud_error(baud));
                 }
                 t2.c_cflag &= !CBAUD;
                 t2.c_cflag |= BOTHER;
                 t2.c_ispeed = baud;
                 t2.c_ospeed = baud;
                 if libc::ioctl(self.fd, TCSETS2, &t2) != 0 {
-                    return Err(format!("Failed to set custom baud rate ({}): {}", baud, std::io::Error::last_os_error()));
+                    return Err(custom_baud_error(baud));
                 }
             }
         }
@@ -817,7 +866,7 @@ impl Uart {
         unsafe { libc::ioctl(self.fd, req, &bit) };
     }
 
-    pub fn set_baudrate(&self, baud: u32) -> Result<(), String> {
+    pub fn set_baudrate(&self, baud: u32) -> KResult<()> {
         self.configure(baud)
     }
 
@@ -923,7 +972,7 @@ pub fn cheetah_reset(serialport: &str, reactor: &Rc<Reactor>) -> KResult<()> {
     // configuring the bootloader. This sequence takes care of disabling it for
     // sure.
     // Open the serial port with RTS asserted
-    let ser = Uart::open(serialport, 2400, true, Some(true)).map_err(KError::Other)?;
+    let ser = Uart::open(serialport, 2400, Some(true), Some(true))?;
     ser.read(1);
     reactor.pause(reactor.monotonic() + 0.100)?;
     // Toggle DTR
@@ -945,7 +994,7 @@ pub fn cheetah_reset(serialport: &str, reactor: &Rc<Reactor>) -> KResult<()> {
 // Attempt an arduino style reset on a serial port
 pub fn arduino_reset(serialport: &str, reactor: &Rc<Reactor>) -> KResult<()> {
     // First try opening the port at a different baud
-    let ser = Uart::open(serialport, 2400, true, None).map_err(KError::Other)?;
+    let ser = Uart::open(serialport, 2400, Some(true), None)?;
     ser.read(1);
     reactor.pause(reactor.monotonic() + 0.100)?;
     // Then toggle DTR

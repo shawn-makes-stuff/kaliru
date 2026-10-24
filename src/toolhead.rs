@@ -976,7 +976,7 @@ impl PrinterObject for ToolHead {
         self.extra_axes.borrow_mut().clear();
         *self.kin.borrow_mut() = None;
         if let Some(t) = self.priming_timer.borrow_mut().take() {
-            self.reactor.unregister_timer(&t);
+            self.reactor.forget_timer(&t);
         }
     }
 }

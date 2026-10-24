@@ -367,7 +367,7 @@ impl PrinterObject for PrinterLCD {
             m.teardown();
         }
         if let Some(t) = self.screen_update_timer.borrow_mut().take() {
-            self.reactor.unregister_timer(&t);
+            self.reactor.forget_timer(&t);
         }
     }
 }

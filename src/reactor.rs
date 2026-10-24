@@ -281,6 +281,20 @@ impl Reactor {
         *self.timers.borrow_mut() = timers;
     }
 
+    /// Whether a timer is registered (python's unregister_timer raises
+    /// ValueError for one that is not: the plugin layer checks this)
+    pub fn has_timer(&self, timer_handler: &Timer) -> bool {
+        self.timers.borrow().iter().any(|t| Rc::ptr_eq(t, timer_handler))
+    }
+
+    /// Not in python: a printer object's teardown drops its timer, which
+    /// finalize() may have cleared already (python discards the reactor)
+    pub fn forget_timer(&self, timer_handler: &Timer) {
+        if self.has_timer(timer_handler) {
+            self.unregister_timer(timer_handler);
+        }
+    }
+
     fn check_timers(&self, eventtime: f64, busy: bool) -> f64 {
         if eventtime < self.next_timer.get() {
             if busy {

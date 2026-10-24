@@ -259,8 +259,10 @@ impl Palette2 {
 
         self.signal_disconnect.set(false);
         logging::info(&format!("Connecting to Palette 2 on port ({}) at ({})", self.serial_port, self.baud));
-        match Uart::open(&self.serial_port, self.baud as u32, false, Some(true)) {
+        match Uart::open(&self.serial_port, self.baud as u32, None, Some(true)) {
             Ok(s) => *self.serial.borrow_mut() = Some(s),
+            // (except SerialException: other errors propagate)
+            Err(e) if e.py_class() != "serial.serialutil.SerialException" => return Err(e),
             Err(_) => {
                 gcmd.respond_info("Unable to connect to the Palette 2", true);
                 return Ok(());

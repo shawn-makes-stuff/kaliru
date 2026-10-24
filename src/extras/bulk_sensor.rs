@@ -179,7 +179,7 @@ impl BatchBulkHelper {
     pub fn teardown(&self) {
         self.client_cbs.borrow_mut().clear();
         if let Some(t) = self.batch_timer.borrow_mut().take() {
-            self.printer.get_reactor().unregister_timer(&t);
+            self.printer.get_reactor().forget_timer(&t);
         }
     }
 }

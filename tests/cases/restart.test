@@ -1,0 +1,9 @@
+# FIRMWARE_RESTART and RESTART (the printer instance ends and a new one starts)
+CONFIG restart.cfg
+DICTIONARY atmega2560.dict
+
+G4 P100
+FIRMWARE_RESTART
+G4 P100
+RESTART
+G4 P100

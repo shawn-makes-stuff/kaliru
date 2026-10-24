@@ -221,7 +221,7 @@ impl PrinterObject for EncoderSensor {
     fn teardown(&self) {
         *self.extruder.borrow_mut() = None;
         if let Some(t) = self.timer.borrow_mut().take() {
-            self.reactor.unregister_timer(&t);
+            self.reactor.forget_timer(&t);
         }
     }
 }

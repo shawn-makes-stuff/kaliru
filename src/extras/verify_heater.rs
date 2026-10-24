@@ -164,7 +164,7 @@ impl PrinterObject for HeaterCheck {
     fn teardown(&self) {
         *self.heater.borrow_mut() = None;
         if let Some(t) = self.check_timer.borrow_mut().take() {
-            self.printer.get_reactor().unregister_timer(&t);
+            self.printer.get_reactor().forget_timer(&t);
         }
     }
 }

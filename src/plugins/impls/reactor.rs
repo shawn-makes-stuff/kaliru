@@ -13,7 +13,13 @@ type PyCompletion = ReactorCompletion<PyRef>;
 pub fn register(r: &mut Registry) {
     r.method("klippy.reactor.SelectReactor.register_timer", register_timer);
     method!(r, "klippy.reactor.SelectReactor", Reactor, update_timer(re, t: Rc<ReactorTimer>, waketime: f64) => re.update_timer(&t, waketime));
-    method!(r, "klippy.reactor.SelectReactor", Reactor, unregister_timer(re, t: Rc<ReactorTimer>) => re.unregister_timer(&t));
+    // timers.pop(timers.index(timer_handler)): ValueError for an unknown timer
+    method!(r, "klippy.reactor.SelectReactor", Reactor, unregister_timer(re, t: Rc<ReactorTimer>) => {
+        if !re.has_timer(&t) {
+            return Err(KError::Py("ValueError".into(), "list.index(x): x not in list".into()));
+        }
+        re.unregister_timer(&t)
+    });
     method!(r, "klippy.reactor.SelectReactor", Reactor, pause(re, waketime: f64) => re.pause(waketime).map_err(|e| KError::Reactor(e.0)));
     method!(r, "klippy.reactor.SelectReactor", Reactor, delay_for_ms(re, ms: f64) => re.delay_for_ms(ms).map_err(|e| KError::Reactor(e.0)));
     method!(r, "klippy.reactor.SelectReactor", Reactor, get_gc_stats(re) => re.get_gc_stats());

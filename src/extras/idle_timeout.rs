@@ -257,7 +257,7 @@ impl PrinterObject for IdleTimeout {
     fn teardown(&self) {
         *self.toolhead.borrow_mut() = None;
         if let Some(t) = self.timeout_timer.borrow_mut().take() {
-            self.reactor.unregister_timer(&t);
+            self.reactor.forget_timer(&t);
         }
     }
 }

@@ -166,7 +166,7 @@ impl PrinterObject for IndxHeatsinkFan {
         self.heaters.borrow_mut().clear();
         self.steppers.borrow_mut().clear();
         if let Some(t) = self.check_timer.borrow_mut().take() {
-            self.printer.get_reactor().unregister_timer(&t);
+            self.printer.get_reactor().forget_timer(&t);
         }
     }
 }

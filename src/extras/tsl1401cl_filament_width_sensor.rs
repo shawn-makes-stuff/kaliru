@@ -251,7 +251,7 @@ impl PrinterObject for FilamentWidthSensor {
     }
     fn teardown(&self) {
         if let Some(t) = self.extrude_factor_update_timer.borrow_mut().take() {
-            self.reactor.unregister_timer(&t);
+            self.reactor.forget_timer(&t);
         }
     }
 }

@@ -2347,7 +2347,7 @@ impl PrinterObject for Mcu {
         self.cfg.config_callbacks.borrow_mut().clear();
         *self.conn.emergency_stop_cmd.borrow_mut() = None;
         if let Some(t) = self.non_critical_recon_timer.borrow_mut().take() {
-            self.reactor.unregister_timer(&t);
+            self.reactor.forget_timer(&t);
         }
         self.serial.teardown();
     }

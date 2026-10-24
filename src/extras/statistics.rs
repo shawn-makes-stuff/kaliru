@@ -170,7 +170,7 @@ impl PrinterObject for PrinterStats {
     fn teardown(&self) {
         self.stats_cb.borrow_mut().clear();
         if let Some(t) = self.stats_timer.borrow_mut().take() {
-            self.printer.get_reactor().unregister_timer(&t);
+            self.printer.get_reactor().forget_timer(&t);
         }
     }
 }
